@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { AnimatePresence, motion } from 'motion/react';
+import { AnimatePresence, motion, useMotionValue, useSpring } from 'motion/react';
 import { Settings as Cog, Paperclip, FileText } from 'lucide-react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
@@ -15,10 +15,50 @@ import mapImg from './assets/skyrimmap.jpg';
 import { api, sk, dLabel, stamp, dayKey, hue, h12, nowInput, inputToIso } from './api';
 import { THEMES, FONTS } from './themes';
 
+// A few Discord-style extras marked doesn't support out of the box: ||spoilers||, __underline__
+// (GFM treats __x__ as bold; Discord uses it for underline instead, so this intercepts it first),
+// and >>> which — in Discord — turns the rest of the message into one blockquote.
+marked.use({
+  extensions: [
+    {
+      name: 'spoiler', level: 'inline',
+      start(src) { const i = src.indexOf('||'); return i < 0 ? undefined : i; },
+      tokenizer(src) { const m = /^\|\|([\s\S]+?)\|\|/.exec(src); if (m) return { type: 'spoiler', raw: m[0], tokens: this.lexer.inlineTokens(m[1]) }; },
+      renderer(token) { return `<span class="spoiler">${this.parser.parseInline(token.tokens)}</span>`; },
+    },
+    {
+      name: 'underline', level: 'inline',
+      start(src) { const i = src.indexOf('__'); return i < 0 ? undefined : i; },
+      tokenizer(src) { const m = /^__([^\n]+?)__(?!_)/.exec(src); if (m) return { type: 'underline', raw: m[0], tokens: this.lexer.inlineTokens(m[1]) }; },
+      renderer(token) { return `<u>${this.parser.parseInline(token.tokens)}</u>`; },
+    },
+    {
+      name: 'quoteRest', level: 'block',
+      start(src) { return /^>>> /.test(src) ? 0 : undefined; },
+      tokenizer(src) { const m = /^>>> ([\s\S]*)$/.exec(src); if (m) return { type: 'quoteRest', raw: m[0], tokens: this.lexer.blockTokens(m[1], []) }; },
+      renderer(token) { return `<blockquote>${this.parser.parse(token.tokens)}</blockquote>`; },
+    },
+  ],
+});
 const md = (s) => ({ __html: DOMPurify.sanitize(marked.parse(s || '')) });
+const spoil = (e) => e.target.classList.contains('spoiler') && e.target.classList.toggle('revealed'); // click a spoiler span to reveal it
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const excerpt = (b) => b.replace(/[#>*_`[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, 320);
-const glow = { backgroundColor: 'var(--panel)', glowColor: '40 50 60', colors: ['#b08d3c', '#a33a34', '#4f8f86'], borderRadius: 10 };
+const excerpt = (b) => b.replace(/[#>*_`[\]|]/g, '').replace(/\s+/g, ' ').trim().slice(0, 320);
+const glow = { backgroundColor: 'var(--panel)', glowColor: '40 50 60', colors: ['#b6913e', '#a83a32', '#4c8d82'], borderRadius: 10 };
+// Reads a CSS custom property off the document root, live — used to hand the canvas-based
+// Shredder actual colour values (it can't resolve var(--x) itself), and re-reads whenever the
+// theme changes so it follows along instead of staying stuck on whatever loaded first.
+function useThemeVar(name, fallback) {
+  const read = () => (typeof document === 'undefined' ? fallback : getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback);
+  const [v, setV] = useState(read);
+  useEffect(() => {
+    setV(read());
+    const obs = new MutationObserver(() => setV(read()));
+    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    return () => obs.disconnect();
+  }, [name]);
+  return v;
+}
 
 /* Pin positions as % of skyrimmap.jpg, placed over each hold's shield. */
 const HOLDS = {
@@ -102,8 +142,11 @@ function Overlay({ id, close, children }) { // frosted backdrop; the card grows 
   }, []);
   return createPortal(
     <div className="overlay-wrap">
-      <motion.div className="overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={close} />
-      <motion.div layoutId={id} className="sheet"><button className="sheet-x" onClick={close}>Close</button>{children}</motion.div>
+      <motion.div className="overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+        transition={{ duration: .3, ease: [0.22, 1, 0.36, 1] }} onClick={close} />
+      <motion.div layoutId={id} className="sheet" transition={{ type: 'spring', damping: 32, stiffness: 260, mass: .9 }}>
+        <button className="sheet-x" onClick={close}>Close</button>{children}
+      </motion.div>
     </div>, document.body);
 }
 
@@ -150,18 +193,52 @@ function Attachments({ report, me, onChange, locked }) {
   );
 }
 
-export function Report({ r, me, onChange, reveal, onSearch }) {
+const SHEET_SPRING = { type: 'spring', damping: 32, stiffness: 260, mass: .9 };
+
+// A tilting "dossier" tile — a manila-folder take on the card, reacting to the cursor. Adapted
+// from reactbits.dev's Tilted Card pattern (mouse-position -> spring-smoothed rotateX/rotateY)
+// using the motion values already in this project rather than pulling in a separate component.
+function Dossier({ r, onOpen }) {
+  const ref = useRef(null);
+  const rx = useMotionValue(0), ry = useMotionValue(0), sc = useMotionValue(1);
+  const srx = useSpring(rx, { damping: 26, stiffness: 260, mass: 1 });
+  const sry = useSpring(ry, { damping: 26, stiffness: 260, mass: 1 });
+  const ssc = useSpring(sc, { damping: 22, stiffness: 260, mass: 1 });
+  const move = (e) => {
+    const rect = ref.current.getBoundingClientRect();
+    const px = (e.clientX - rect.left) / rect.width - 0.5, py = (e.clientY - rect.top) / rect.height - 0.5;
+    rx.set(py * -12); ry.set(px * 12);
+  };
+  const leave = () => { rx.set(0); ry.set(0); sc.set(1); };
+  const hold = r.tags.find((t) => t.category === 'Hold');
+  return (
+    <motion.article ref={ref} layoutId={'r' + r.id} transition={SHEET_SPRING} className={'dossier' + (r.deleted_at ? ' redacted' : '')}
+      style={{ rotateX: srx, rotateY: sry, scale: ssc, transformPerspective: 900 }}
+      onMouseMove={move} onMouseEnter={() => sc.set(1.035)} onMouseLeave={leave}
+      role="button" tabIndex={0} onClick={onOpen} onKeyDown={(e) => e.key === 'Enter' && onOpen()}>
+      <div className="dossier-tab">{hold ? hold.name : 'Case file'}</div>
+      <h3>{r.title}</h3>
+      <p className="meta">{stamp(r.created_at)}</p>
+      <p className="clamp">{excerpt(r.body)}</p>
+      {r.deleted_at && <span className="dossier-stamp">REDACTED</span>}
+    </motion.article>
+  );
+}
+
+export function Report({ r, me, onChange, reveal, onSearch, variant = 'list' }) {
   const [open, setOpen] = useState(false), [mode, setMode] = useState(null), [f, setF] = useState({}), [pool, setPool] = useState([]), [err, setErr] = useState('');
   const late = r.filed_at && Math.abs(new Date(r.filed_at) - new Date(r.created_at)) > 6e4;
+  const canRedact = !r.deleted_at && (me.role === 'warden' || r.author === me.callsign);
   const pick = (m) => {
     setErr(''); setMode(mode === m ? null : m);
     if (m === 'edit') setF({ title: r.title, body: r.body, confidence: r.confidence || '', source: r.source || '', note: '' });
     if (m === 'link') { setF({ toId: '' }); api.get('/reports?limit=200').then(setPool); }
+    if (m === 'addend') setF({ body: '', confidence: '', source: '' });
   };
   const send = (path, body) => api.post(`/reports/${r.id}/${path}`, body).then(() => { setMode(null); onChange(); }).catch((e) => setErr(e.message));
   const set = (k) => (e) => setF({ ...f, [k]: e.target ? e.target.value : e });
-  const card = (
-    <motion.article layoutId={'r' + r.id} className={'report card' + (r.deleted_at ? ' redacted' : '')} role="button" tabIndex={0}
+  const card = variant === 'tile' ? <Dossier r={r} onOpen={() => setOpen(true)} /> : (
+    <motion.article layoutId={'r' + r.id} transition={SHEET_SPRING} className={'report card' + (r.deleted_at ? ' redacted' : '')} role="button" tabIndex={0}
       onClick={() => setOpen(true)} onKeyDown={(e) => e.key === 'Enter' && setOpen(true)}>
       <h3>{r.title}</h3>
       <p className="meta">{stamp(r.created_at)}, {r.author} <Meta conf={r.confidence} /></p>
@@ -175,15 +252,25 @@ export function Report({ r, me, onChange, reveal, onSearch }) {
         <Overlay id={'r' + r.id} close={() => setOpen(false)}>
           <h2>{r.title}</h2>
           <p className="meta">{stamp(r.created_at)}, filed by {r.author}{late && ` on ${stamp(r.filed_at)}`}{r.deleted_at && `. Redacted ${stamp(r.deleted_at)}`} <Meta conf={r.confidence} source={r.source} /></p>
-          <div className="md" dangerouslySetInnerHTML={md(r.body)} />
+          <div className="md" onClick={spoil} dangerouslySetInnerHTML={md(r.body)} />
           <div>{r.tags.map((t) => <Chip key={t.id} tag={t} on />)}</div>
           {r.links.length > 0 && <p className="meta">Linked to: {r.links.map((l) => (onSearch
             ? <button key={l.id} className="lnk" onClick={() => { setOpen(false); onSearch(l.title); }}>{l.title}</button> : <span key={l.id} className="lnk">{l.title}</span>))}</p>}
+          {r.addenda.length > 0 && (
+            <div className="addenda"><h3>Addenda</h3>
+              {r.addenda.map((a) => (
+                <div key={a.id} className="addendum">
+                  <p className="meta">{stamp(a.created_at)}, {a.author} <Meta conf={a.confidence} source={a.source} /></p>
+                  <div className="md" onClick={spoil} dangerouslySetInnerHTML={md(a.body)} />
+                </div>))}
+            </div>)}
           <Attachments report={r} me={me} onChange={onChange} locked={!!r.deleted_at} />
           {r.deleted_at ? (me.role === 'warden' && <button onClick={() => api.post(`/reports/${r.id}/restore`).then(onChange)}>Restore</button>) : (
             <div className="row">
               <button onClick={() => pick('edit')}>Edit</button><button onClick={() => pick('link')}>Link report</button>
+              <button onClick={() => pick('addend')}>Add addendum</button>
               {r.revisions.length > 0 && <button onClick={() => pick('hist')}>History ({r.revisions.length})</button>}
+              {canRedact && <HB danger done="Redacted" onHold={() => send('redact', {})}>Hold to redact</HB>}
             </div>)}
           {mode === 'edit' && (
             <div className="form"><input value={f.title} onChange={set('title')} /><textarea rows={8} value={f.body} onChange={set('body')} />
@@ -195,10 +282,15 @@ export function Report({ r, me, onChange, reveal, onSearch }) {
             <div className="form row"><select value={f.toId} onChange={set('toId')}><option value="">Choose a report to link...</option>
               {pool.filter((p) => p.id !== r.id).map((p) => <option key={p.id} value={p.id}>{p.title} ({dLabel(sk(p.created_at))})</option>)}</select>
               <button className="primary" onClick={() => send('links', { toId: +f.toId })}>Link</button></div>)}
+          {mode === 'addend' && (
+            <div className="form"><textarea rows={5} placeholder="Additional information, from this or a later source..." value={f.body} onChange={set('body')} />
+              <div className="row"><ConfSelect value={f.confidence} onChange={set('confidence')} /><SourceField value={f.source} onChange={set('source')} /></div>
+              <p className="dim">An addendum can't be edited or removed once posted — it's a dated statement on the record.</p>
+              <button className="primary" onClick={() => send('addenda', f)}>Post addendum</button></div>)}
           {mode === 'hist' && (
             <div className="form">{r.revisions.map((v) => (
-              <details key={v.id}><summary>{stamp(v.edited_at)}, {v.editor}{v.note && `: ${v.note}`}</summary><b>{v.title}</b><div className="md" dangerouslySetInnerHTML={md(v.body)} /></details>))}
-              <details><summary>Original, {stamp(r.filed_at)}, {r.author}</summary><b>{r.original.title}</b><div className="md" dangerouslySetInnerHTML={md(r.original.body)} /></details></div>)}
+              <details key={v.id}><summary>{stamp(v.edited_at)}, {v.editor}{v.note && `: ${v.note}`}</summary><b>{v.title}</b><div className="md" onClick={spoil} dangerouslySetInnerHTML={md(v.body)} /></details>))}
+              <details><summary>Original, {stamp(r.filed_at)}, {r.author}</summary><b>{r.original.title}</b><div className="md" onClick={spoil} dangerouslySetInnerHTML={md(r.original.body)} /></details></div>)}
           {err && <p className="bad">{err}</p>}
         </Overlay>)}</AnimatePresence>
     </>
@@ -327,7 +419,7 @@ export function Compose({ done, me }) {
         </div>
       </BorderGlow>
       <div className="panel"><h2>{title || 'Preview'}</h2><p className="meta">{dLabel(sk(inputToIso(when)))} <Meta conf={conf} source={source} /></p>
-        <div className="md" dangerouslySetInnerHTML={md(body || '*Nothing written yet.*')} /></div>
+        <div className="md" onClick={spoil} dangerouslySetInnerHTML={md(body || '*Nothing written yet.*')} /></div>
       {picker && <TagPicker tags={tags} on={on} lock={auto} toggle={toggle} create={create} close={() => setPicker(false)}
         canDelete={me.role === 'warden'} onDeleted={(id) => { setPick((p) => p.filter((x) => x !== id)); load(); }} />}
     </div>
@@ -336,6 +428,8 @@ export function Compose({ done, me }) {
 
 function ReportsArchive({ me, sel, setSel }) {
   const [q, setQ] = useState(''), [rows, setRows] = useState([]), [stats, setStats] = useState([]), [sd, setSd] = useState(false), [k, setK] = useState(0), [picker, setPicker] = useState(false);
+  const [view, setView] = useState('list');
+  const shredColor = useThemeVar('--cell', '#1b1b1d'), shredSlit = useThemeVar('--line', '#2a2a2c');
   useEffect(() => { api.get('/stats/tags').then(setStats); }, [k]);
   useEffect(() => {
     const t = setTimeout(() => api.get(`/reports?q=${encodeURIComponent(q)}&tags=${sel.join(',')}&deleted=${sd ? 1 : 0}`).then(setRows), 250);
@@ -360,7 +454,13 @@ function ReportsArchive({ me, sel, setSel }) {
             {sel.length > 0 && <button onClick={() => setSel([])}>Clear filters</button>}
             {me.role === 'warden' && <label><input type="checkbox" checked={sd} onChange={(e) => setSd(e.target.checked)} /> show redacted</label>}</div>
         </div>
-        {rows.map((r) => <Report key={r.id} r={r} me={me} onChange={() => setK((x) => x + 1)} onSearch={setQ} />)}
+        <div className="row view-toggle">
+          <button className={view === 'list' ? 'tab on' : 'tab'} onClick={() => setView('list')}>List</button>
+          <button className={view === 'tile' ? 'tab on' : 'tab'} onClick={() => setView('tile')}>Dossiers</button>
+        </div>
+        <div className={view === 'tile' ? 'tiles' : undefined}>
+          {rows.map((r) => <Report key={r.id} r={r} me={me} onChange={() => setK((x) => x + 1)} onSearch={setQ} variant={view} reveal />)}
+        </div>
         {picker && <TagPicker tags={stats} on={new Set(sel)} toggle={flip} close={() => setPicker(false)}
           canDelete={me.role === 'warden'} onDeleted={(id) => { setSel((s) => s.filter((x) => x !== id)); setK((x) => x + 1); }} />}
       </div>
@@ -369,8 +469,8 @@ function ReportsArchive({ me, sel, setSel }) {
         <p className="dim">Drag a report into the slot to redact it. It stays in the vault; a Warden can restore it.</p>
         <ErrorBoundary label="The shredder">
           {shreddable.length > 0 ? (
-            <Shredder items={shreddable.map((r) => ({ id: r.id, title: r.title, at: r.created_at }))} width={320} height={440}
-              color="#e4d8b8" slitColor="#3f3f46" onShred={shred}
+            <Shredder items={shreddable.map((r) => ({ id: r.id, title: r.title, at: r.created_at }))} width={280} height={440}
+              color={shredColor} slitColor={shredSlit} onShred={shred}
               renderItem={(r) => <div className="shred-item"><b>{r.title}</b><span>{stamp(r.at)}</span></div>} />
           ) : <p className="dim">Nothing here of yours to redact yet.</p>}
         </ErrorBoundary>
@@ -412,11 +512,16 @@ function AccountPane({ me, setMe }) {
 }
 
 export function SettingsCog({ settings, save, me, setMe }) {
-  const [open, setOpen] = useState(false), [tab, setTab] = useState('look');
+  const [open, setOpen] = useState(false), [tab, setTab] = useState('look'), [spin, setSpin] = useState(0);
+  const toggle = () => {
+    setSpin((s) => s + 1); // re-keys the icon so its spin animation replays every click, open or close
+    if (open) setOpen(false); else setTimeout(() => setOpen(true), 220); // let the cog finish turning before the panel pops out
+  };
   return (
     <div className="cog">
-      {open && (
-        <div className="panel cog-pop">
+      <AnimatePresence>{open && (
+        <motion.div className="panel cog-pop" initial={{ opacity: 0, scale: .85, y: 10 }} animate={{ opacity: 1, scale: 1, y: 0 }}
+          exit={{ opacity: 0, scale: .85, y: 10 }} transition={{ type: 'spring', damping: 22, stiffness: 320 }}>
           <div className="row subnav" style={{ marginBottom: 10 }}>
             <button className={tab === 'look' ? 'tab on' : 'tab'} onClick={() => setTab('look')}>Appearance</button>
             <button className={tab === 'acct' ? 'tab on' : 'tab'} onClick={() => setTab('acct')}>Account</button>
@@ -431,11 +536,17 @@ export function SettingsCog({ settings, save, me, setMe }) {
                 <button key={k} className={settings.font === k ? 'tab on' : 'tab'} onClick={() => save({ ...settings, font: k })}>{l}</button>))}</div>
               <label className="row" style={{ marginTop: 12 }}><input type="checkbox" checked={settings.animate !== false}
                 onChange={(e) => save({ ...settings, animate: e.target.checked })} /> Animate the background</label>
+              <label className="row"><input type="checkbox" checked={settings.clickSpark !== false}
+                onChange={(e) => save({ ...settings, clickSpark: e.target.checked })} /> Spark on click</label>
               <p className="dim">Saved to your callsign.</p>
             </>
           ) : <AccountPane me={me} setMe={setMe} />}
-        </div>)}
-      <button className="cog-btn" onClick={() => setOpen(!open)} aria-label="Settings" aria-expanded={open}><Cog size={22} /></button>
+        </motion.div>)}</AnimatePresence>
+      <button className="cog-btn" onClick={toggle} aria-label="Settings" aria-expanded={open}>
+        <motion.span key={spin} style={{ display: 'inline-flex' }} initial={{ rotate: 0 }} animate={{ rotate: 360 }} transition={{ duration: .55, ease: 'easeInOut' }}>
+          <Cog size={22} />
+        </motion.span>
+      </button>
     </div>
   );
 }
@@ -473,7 +584,7 @@ function PoiCard({ p, me, reload, openTag }) {
   return (
     <>
       {!open && (
-        <motion.article layoutId={'p' + p.id} className={'report card' + (redacted ? ' redacted' : '')} role="button" tabIndex={0} onClick={() => setOpen(true)} onKeyDown={(e) => e.key === 'Enter' && setOpen(true)}>
+        <motion.article layoutId={'p' + p.id} transition={SHEET_SPRING} className={'report card' + (redacted ? ' redacted' : '')} role="button" tabIndex={0} onClick={() => setOpen(true)} onKeyDown={(e) => e.key === 'Enter' && setOpen(true)}>
           <h3>{p.name}</h3>
           <p className="meta">{p.n} report(s){p.aliases && `, also known as ${p.aliases}`}</p>
           <p className="clamp">{redacted ? 'This file has been redacted.' : (excerpt(p.description) || 'No description yet.')}</p>
@@ -490,7 +601,7 @@ function PoiCard({ p, me, reload, openTag }) {
               <div className="row"><button className="primary" onClick={save}>Save</button><button onClick={() => setForm(null)}>Cancel</button></div></div>
           ) : (
             <>
-              <div className="md" dangerouslySetInnerHTML={md((redacted ? '*This file has been redacted. Its contents are hidden and its tag no longer applies to reports.*' : p.description) || '*No description yet.*')} />
+              <div className="md" onClick={spoil} dangerouslySetInnerHTML={md((redacted ? '*This file has been redacted. Its contents are hidden and its tag no longer applies to reports.*' : p.description) || '*No description yet.*')} />
               <div className="row">
                 {!redacted && <button onClick={() => setForm(p)}>Edit file</button>}
                 <button className="primary" onClick={() => { setOpen(false); openTag([p.id]); }}>Read their reports</button>

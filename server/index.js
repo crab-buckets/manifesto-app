@@ -233,6 +233,7 @@ const hydrate = (rows, role = 'agent') => { // each report comes back as a full 
   const tg = all(`SELECT rt.report_id, rt.auto, t.id, t.name, c.name AS category, p.deleted_at AS poi_deleted FROM report_tags rt JOIN tags t ON t.id = rt.tag_id JOIN categories c ON c.id = t.category_id LEFT JOIN poi_profiles p ON p.tag_id = t.id WHERE rt.report_id IN (${m})`, ...ids);
   const rv = all(`SELECT v.id, v.report_id, v.title, v.body, v.confidence, s.name AS source, v.note, v.edited_at, u.callsign AS editor FROM report_revisions v JOIN users u ON u.id = v.edited_by LEFT JOIN sources s ON s.id = v.source_id WHERE v.report_id IN (${m}) ORDER BY v.id`, ...ids);
   const at = all(`SELECT id, report_id, original_name, mime, size, created_at FROM attachments WHERE report_id IN (${m}) AND deleted_at IS NULL ORDER BY id`, ...ids);
+  const ad = all(`SELECT n.id, n.report_id, n.body, n.confidence, s.name AS source, n.created_at, u.callsign AS author FROM addenda n JOIN users u ON u.id = n.author_id LEFT JOIN sources s ON s.id = n.source_id WHERE n.report_id IN (${m}) ORDER BY n.id`, ...ids);
   const lk = all(`SELECT a, b FROM report_links WHERE a IN (${m}) OR b IN (${m})`, ...ids, ...ids);
   const lids = [...new Set(lk.flatMap((l) => [l.a, l.b]))];
   const titles = lids.length ? Object.fromEntries(all(`SELECT x.id, COALESCE((SELECT v.title FROM report_revisions v WHERE v.report_id = x.id ORDER BY v.id DESC LIMIT 1), x.title) AS title
@@ -244,7 +245,7 @@ const hydrate = (rows, role = 'agent') => { // each report comes back as a full 
       ...(c ? { title: c.title, body: c.body, confidence: c.confidence, source: c.source } : {}),
       tags: tg.filter((x) => x.report_id === r.id && !(x.poi_deleted && role !== 'warden')) // a redacted person's tag is hidden from non-Wardens
         .map(({ poi_deleted, ...x }) => x),
-      revisions: [...v].reverse(), attachments: at.filter((x) => x.report_id === r.id),
+      revisions: [...v].reverse(), attachments: at.filter((x) => x.report_id === r.id), addenda: ad.filter((x) => x.report_id === r.id),
       links: lk.filter((l) => l.a === r.id || l.b === r.id).map((l) => { const o = l.a === r.id ? l.b : l.a; return { id: o, title: titles[o] }; }),
     };
   });
@@ -278,6 +279,22 @@ app.post('/api/reports/:id/edit', need(), exists, (req, res) => {
     tagText(id, title + ' ' + body);
   })();
   res.json(one(id, req.user.role));
+});
+/* An addendum is a follow-up note pinned to a report — a later source adding detail without rewriting
+   the original. Unlike an edit, it doesn't replace anything, and unlike an edit it can never be
+   changed or removed once posted (add_no_upd/add_no_del in db.js) — it's a dated statement from
+   whoever posted it, on the record. */
+app.post('/api/reports/:id/addenda', need(), exists, (req, res) => {
+  const id = +req.params.id, r = db.prepare('SELECT deleted_at FROM reports WHERE id = ?').get(id);
+  if (r.deleted_at) return res.status(400).json({ error: 'That report is redacted' });
+  const body = String(req.body?.body || '').trim().slice(0, 4000);
+  if (!body) return res.status(400).json({ error: 'An addendum needs some text' });
+  db.transaction(() => {
+    db.prepare('INSERT INTO addenda(report_id, body, confidence, source_id, author_id) VALUES(?,?,?,?,?)')
+      .run(id, body, conf(req.body.confidence), srcId(req.body.source), req.user.id);
+    tagText(id, body); // names mentioned in the addendum tag the report too
+  })();
+  res.status(201).json(one(id, req.user.role));
 });
 app.post('/api/reports/:id/links', need(), exists, (req, res) => {
   const a = +req.params.id, b = +req.body?.toId;
@@ -368,10 +385,11 @@ app.get('/api/reports', need(), (req, res) => {
   const { q, tags, deleted, limit, offset } = req.query, w = [], a = [];
   if (!(deleted === '1' && req.user.role === 'warden')) w.push('r.deleted_at IS NULL');
   const words = String(q || '').match(/[\p{L}\p{N}]+/gu);
-  if (words) { // searches originals and every revision
+  if (words) { // searches originals, every revision, and every addendum
     const f = words.map((t) => `"${t}"*`).join(' ');
-    w.push(`(r.id IN (SELECT rowid FROM reports_fts WHERE reports_fts MATCH ?) OR r.id IN (SELECT report_id FROM report_revisions WHERE id IN (SELECT rowid FROM rev_fts WHERE rev_fts MATCH ?)))`);
-    a.push(f, f);
+    w.push(`(r.id IN (SELECT rowid FROM reports_fts WHERE reports_fts MATCH ?) OR r.id IN (SELECT report_id FROM report_revisions WHERE id IN (SELECT rowid FROM rev_fts WHERE rev_fts MATCH ?))
+      OR r.id IN (SELECT report_id FROM addenda WHERE id IN (SELECT rowid FROM add_fts WHERE add_fts MATCH ?)))`);
+    a.push(f, f, f);
   }
   for (const t of String(tags || '').split(',').filter(Boolean)) { w.push('r.id IN (SELECT report_id FROM report_tags WHERE tag_id = ?)'); a.push(+t); }
   const rows = db.prepare(`${SELECT} ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY r.created_at DESC LIMIT ? OFFSET ?`)
@@ -401,13 +419,14 @@ app.post('/api/reports/:id/restore', need('warden'), (req, res) => {
 const THEMES = ['nocturne', 'parchment', 'stormcloak', 'thalmor', 'imperial', 'college', 'forsworn', 'blackreach'], FONTS = ['ledger', 'typewriter', 'clean'];
 app.get('/api/settings', need(), (req, res) => {
   const r = db.prepare('SELECT json FROM user_settings WHERE user_id = ?').get(req.user.id);
-  res.json({ theme: 'nocturne', font: 'ledger', animate: true, ...(r ? JSON.parse(r.json) : {}) });
+  res.json({ theme: 'nocturne', font: 'ledger', animate: true, clickSpark: true, ...(r ? JSON.parse(r.json) : {}) });
 });
 app.put('/api/settings', need(), (req, res) => {
-  const { theme, font, animate = true } = req.body || {};
+  const { theme, font, animate = true, clickSpark = true } = req.body || {};
   if (!THEMES.includes(theme) || !FONTS.includes(font)) return res.status(400).json({ error: 'Unknown theme or font' });
-  db.prepare('INSERT INTO user_settings(user_id, json) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET json = excluded.json').run(req.user.id, JSON.stringify({ theme, font, animate: !!animate }));
-  res.json({ theme, font, animate: !!animate });
+  const out = { theme, font, animate: !!animate, clickSpark: !!clickSpark };
+  db.prepare('INSERT INTO user_settings(user_id, json) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET json = excluded.json').run(req.user.id, JSON.stringify(out));
+  res.json(out);
 });
 
 /* ---------- stats for dashboard ---------- */

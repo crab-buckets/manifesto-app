@@ -25,7 +25,7 @@ function Auth({ onIn }) {
     <main className="auth">
       <h1><DecryptedText text="MANIFESTO" animateOn="view" sequential speed={90} /></h1>
       <p className="dim">Speak your callsign. Ask nothing more.</p>
-      <BorderGlow backgroundColor="#171d25" glowColor="40 50 60" colors={['#b08d3c', '#a33a34', '#4f8f86']} borderRadius={10}>
+      <BorderGlow backgroundColor="#131315" glowColor="40 50 60" colors={['#b6913e', '#a83a32', '#4c8d82']} borderRadius={10}>
         <div className="glow-pad">
           <input placeholder="Callsign" value={callsign} onChange={(e) => setC(e.target.value)} autoComplete="username" />
           <input type="password" placeholder="Passphrase (8+ characters)" value={passphrase} onChange={(e) => setP(e.target.value)}
@@ -43,7 +43,7 @@ function Auth({ onIn }) {
 
 export default function App() {
   const [me, setMe] = useState(undefined), [view, setView] = useState('dash'), [sel, setSel] = useState([]), [sub, setSub] = useState('reports');
-  const [settings, setSettings] = useState({ theme: 'nocturne', font: 'ledger', animate: true });
+  const [settings, setSettings] = useState({ theme: 'nocturne', font: 'ledger', animate: true, clickSpark: true });
   useEffect(() => { api.get('/me').then(setMe).catch(() => setMe(null)); }, []);
   useEffect(() => { if (me) api.get('/settings').then(setSettings).catch(() => {}); }, [me]);
   useEffect(() => { document.documentElement.dataset.theme = settings.theme; document.documentElement.dataset.font = settings.font; }, [settings]);
@@ -68,8 +68,8 @@ export default function App() {
       {view === 'users' && me.role === 'warden' && <Personnel me={me} />}
     </div>
   );
-  return (
-    <ClickSpark sparkColor={T.spark} sparkCount={10} sparkRadius={24} duration={500}>
+  const content = (
+    <>
       <ErrorBoundary silent>
         <div className="bg-fixed">
           <Dither
@@ -81,6 +81,9 @@ export default function App() {
       </ErrorBoundary>
       <ErrorBoundary label="Manifesto">{body}</ErrorBoundary>
       {me && <SettingsCog settings={settings} save={save} me={me} setMe={setMe} />}
-    </ClickSpark>
+    </>
+  );
+  return settings.clickSpark === false ? content : (
+    <ClickSpark sparkColor={T.spark} sparkCount={10} sparkRadius={24} duration={500}>{content}</ClickSpark>
   );
 }
