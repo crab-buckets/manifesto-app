@@ -163,6 +163,10 @@ const ClickSpark = ({
           position: 'absolute',
           top: 0,
           left: 0,
+          // Sits above every panel, overlay sheet and dropdown in normal DOM order (the canvas is
+          // painted first, so without this the spark draws underneath everything). Portal-rendered
+          // overlays escape this wrapper entirely, but this keeps the spark visible over ordinary content.
+          zIndex: 9999,
           pointerEvents: 'none'
         }}
       />

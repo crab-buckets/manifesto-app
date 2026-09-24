@@ -145,3 +145,56 @@ if (!db.prepare('SELECT 1 FROM categories LIMIT 1').get()) {
     }
   })();
 }
+
+// ---- clearance levels, cover names & per-report access grants ----
+// Everyone can see that a report exists; whether they see its real text depends on their numeric
+// clearance level (>= the report's own), an individual grant a Warden handed them, or having
+// written it themselves. Below all three, the record is scrambled at read time (see server/index.js).
+for (const [col, ddl] of [['clearance', 'INTEGER NOT NULL DEFAULT 0'], ['cover_name', 'TEXT']]) {
+  if (!db.prepare("SELECT 1 FROM pragma_table_info('users') WHERE name = ?").get(col)) db.exec(`ALTER TABLE users ADD COLUMN ${col} ${ddl}`);
+}
+if (!db.prepare("SELECT 1 FROM pragma_table_info('reports') WHERE name = 'clearance'").get()) {
+  db.exec('ALTER TABLE reports ADD COLUMN clearance INTEGER NOT NULL DEFAULT 0');
+}
+db.exec(`
+CREATE TABLE IF NOT EXISTS access_grants(
+  report_id INTEGER NOT NULL REFERENCES reports(id),
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  granted_by INTEGER NOT NULL REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (${NOW}),
+  PRIMARY KEY(report_id, user_id));
+CREATE INDEX IF NOT EXISTS idx_grants_user ON access_grants(user_id);
+
+-- ---- faction rosters: who's in a faction and their rank, kept up to date by whoever's watching
+-- them. Deliberately NOT the immutable revision-history pattern reports use above — a roster is a
+-- living document that gets corrected in place, not a permanent case file.
+CREATE TABLE IF NOT EXISTS factions(
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  notes TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (${NOW}));
+CREATE TABLE IF NOT EXISTS faction_members(
+  id INTEGER PRIMARY KEY,
+  faction_id INTEGER NOT NULL REFERENCES factions(id),
+  name TEXT NOT NULL,
+  rank TEXT NOT NULL DEFAULT '',
+  notes TEXT NOT NULL DEFAULT '',
+  updated_by INTEGER NOT NULL REFERENCES users(id),
+  updated_at TEXT NOT NULL DEFAULT (${NOW}));
+CREATE INDEX IF NOT EXISTS idx_faction_members_faction ON faction_members(faction_id);
+`);
+
+// The field-messages feature (a Warden leaving a note at a Hold for a specific informant) was
+// removed. A database that already created the table keeps it, harmlessly unused — dropping it
+// isn't worth the risk to a table that isn't referenced anywhere any more.
+
+// A curated pool of in-universe cover names. Assigned once, at signup, to every account that isn't
+// the first (the founding Warden never needs one) — see server/index.js. Kept here so it sits next
+// to the column it fills.
+export const COVER_NAMES = [
+  'Quicksilver', 'Ashen Quill', 'The Grey Courier', 'Nightingale’s Ledger', 'Frostwatch', 'The Broken Oath',
+  'Coinless', 'The Hushed Bell', 'Wraithsbane', 'The Ember Scribe', 'Longshadow', 'The Salt Road',
+  'Wintermark', 'The Silent Larder', 'Ravenspeak', 'The Cracked Standard', 'Duskwarden', 'The Tallow Candle',
+  'Ironquill', 'The Drowned Bell', 'Palehold', 'The Wandering Deed', 'Stormtongue', 'The Empty Crest',
+  'Nightbriar', 'The Last Waystone', 'Greymantle', 'The Untold Hearth', 'Fellhollow', 'The Rusted Oath',
+];

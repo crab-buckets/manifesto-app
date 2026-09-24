@@ -2,12 +2,17 @@ import { useEffect, useState } from 'react';
 import ClickSpark from './components/ClickSpark/ClickSpark';
 import Dither from './components/Dither/Dither';
 import { THEMES, BG, hexToRgb01 } from './themes';
-import DecryptedText from './components/Decrypting/decryptText';
+import ASCIIText from './components/ASCIIText/ASCIIText';
 import BorderGlow from './components/BorderGlow/BorderGlow';
 import { api } from './api';
 import ErrorBoundary from './components/ErrorBoundary';
 import { Clock, Dashboard, Compose, Archive, Personnel, SettingsCog } from './views';
 import './index.css';
+
+// The public face of the site, before anyone has signed in — a mundane cover, same as every
+// account's own cover name, and never the real name. Keep this in sync with the <title> in
+// index.html, which can't import this file, so a change here needs a matching change there.
+export const PUBLIC_BRAND = "The Wayfarer's Ledger";
 
 function Auth({ onIn }) {
   const [mode, setMode] = useState('in'), [callsign, setC] = useState(''), [passphrase, setP] = useState(''), [msg, setMsg] = useState('');
@@ -23,7 +28,8 @@ function Auth({ onIn }) {
   };
   return (
     <main className="auth">
-      <h1><DecryptedText text="MANIFESTO" animateOn="view" sequential speed={90} /></h1>
+      <div className="ascii-logo" aria-hidden="true"><ASCIIText text={PUBLIC_BRAND} asciiFontSize={9} textFontSize={110} planeBaseHeight={7} enableWaves={false} /></div>
+      <h1 className="sr-only">{PUBLIC_BRAND}</h1>
       <p className="dim">Speak your callsign. Ask nothing more.</p>
       <BorderGlow backgroundColor="#131315" glowColor="40 50 60" colors={['#b6913e', '#a83a32', '#4c8d82']} borderRadius={10}>
         <div className="glow-pad">
@@ -56,7 +62,7 @@ export default function App() {
   else if (me) body = (
     <div className="shell">
       <header>
-        <span className="brand">Manifesto</span>
+        <span className="brand">{me.brand || 'Manifesto'}</span>
         <nav>{tabs.map(([k, l]) => (
           <button key={k} className={view === k ? 'tab on' : 'tab'} onClick={() => { setView(k); if (k !== 'arch') setSel([]); }}>{l}</button>))}</nav>
         <Clock />

@@ -41,7 +41,7 @@ const [files, setFiles] = useState([
 */
 
 
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 
 import './Shredder.css';
@@ -209,7 +209,7 @@ const paintStrip = (ctx, st, len, dpr) => {
   ctx.globalAlpha = 1;
 };
 
-export default function Shredder({
+const Shredder = forwardRef(function Shredder({
   items = [],
   renderItem,
   onShred,
@@ -234,7 +234,7 @@ export default function Shredder({
   color = '#f5f5f5',
   disabled = false,
   className = ''
-}) {
+}, forwardedRef) {
   const [order, setOrder] = useState(() => items.map(item => item.id));
   const rank = new Map(order.map((id, i) => [id, i]));
   const weight = item => rank.get(item.id) ?? order.length + items.indexOf(item);
@@ -441,6 +441,13 @@ export default function Shredder({
 
   const collapse = (f, s) => {
     f.consumed = true;
+    if (f.external) {
+      s.shifts.forEach(sh => {
+        sh.target = 0;
+      });
+      cfg.current.onShred?.(f.item);
+      return;
+    }
     f.el.style.visibility = 'hidden';
     delete f.slot.dataset.active;
     s.shifts.forEach(sh => {
@@ -453,6 +460,94 @@ export default function Shredder({
     }, f.slot);
     cfg.current.onShred?.(f.item);
     afterShred(f.key);
+  };
+
+  // Feeds a card dragged in from OUTSIDE the shredder's own list (e.g. the main archive list or
+  // tile grid) straight into the tear/fall physics below, without it ever needing to be one of
+  // this component's own tracked `items`. `el` is snapshotted for the paper texture; everything
+  // past that point reuses the same strip/paint pipeline a normal internal grab uses.
+  const feedExternal = (el, item, clientX) => {
+    const s = sim.current;
+    const c = cfg.current;
+    if (c.disabled || !rootRef.current || !el) return;
+    const m = metrics();
+    const full = el.getBoundingClientRect();
+    const innerW = Math.max(40, m.rw - 2 * (c.inset - SLIT));
+    const W = Math.min(full.width, innerW);
+    const H = full.height;
+    const cx = clientX ?? full.left + full.width / 2;
+    const rx = clamp((cx - m.left) / m.k - W / 2, c.inset - SLIT, m.rw - c.inset + SLIT - W);
+    const face = el.firstElementChild || el;
+    const fillRaw = getComputedStyle(face).backgroundColor;
+    const fill = fillRaw === 'rgba(0, 0, 0, 0)' || fillRaw === 'transparent' ? 'rgba(127, 127, 127, 0.35)' : fillRaw;
+    let snap;
+    try {
+      snap = snapshot(el, W, H);
+    } catch {
+      snap = Promise.reject(new Error('snapshot'));
+    }
+    snap.catch(() => {});
+    const n = Math.max(1, Math.round(W / Math.max(4, c.stripWidth)));
+    const sw = Math.floor(W / n);
+    const f = {
+      key: item.id,
+      item,
+      el: null,
+      slot: null,
+      W,
+      H,
+      rx,
+      ry: m.lip - H + c.bite,
+      tx: rx,
+      tilt: 0,
+      lift: 1,
+      v: c.feedSpeed * TUG,
+      age: 0,
+      tex: null,
+      ts: 1,
+      consumed: false,
+      strips: n,
+      external: true
+    };
+    let settled = false;
+    const use = ({ tex, scale }) => {
+      if (settled) return;
+      settled = true;
+      f.tex = tex;
+      f.ts = scale;
+      run();
+    };
+    snap.then(use, () => use(flat(W, H, fill)));
+    setTimeout(() => use(flat(W, H, fill)), 400);
+    s.feeds.push(f);
+    for (let i = 0; i < n; i += 1) {
+      s.strips.push({
+        feed: f,
+        x: i * sw,
+        w: i === n - 1 ? W - sw * (n - 1) : sw,
+        H,
+        phase: 'attached',
+        curl: side() * pick(0.35, 0.9) * DEG * c.curl,
+        amp: pick(1.5, 4) * DEG * c.curl,
+        freq: (Math.PI * 2) / pick(34, 60),
+        wave: pick(0, Math.PI * 2),
+        rA: Math.random(),
+        rB: Math.random(),
+        speed: 0,
+        splay: 0,
+        core: 1,
+        rest: 0,
+        alpha: 1,
+        th: 0,
+        ax: 0,
+        ay: 0,
+        vx: 0,
+        vy: 0,
+        hang: 0,
+        pts: []
+      });
+    }
+    run();
   };
 
   const consumeNow = (key, item, el, slot) => {
@@ -671,12 +766,12 @@ export default function Shredder({
     for (let i = s.feeds.length - 1; i >= 0; i -= 1) {
       const f = s.feeds[i];
       if (!f.consumed) {
-        if (!f.el.isConnected) {
+        if (!f.external && !f.el.isConnected) {
           s.feeds.splice(i, 1);
           continue;
         }
         pulling = true;
-        const sp = at(f.slot, m);
+        const sp = f.external ? null : at(f.slot, m);
         if (f.tex) {
           f.age += dt;
           f.v = c.feedSpeed * (1 + (TUG - 1) * Math.exp(-f.age / TUG_DECAY));
@@ -687,7 +782,7 @@ export default function Shredder({
         f.lift = ease(f.lift, 1, dt, 0.1);
         if (f.ry >= m.lip) {
           collapse(f, s);
-        } else {
+        } else if (!f.external) {
           const jitter = Math.sin(s.t * 150) * 0.5;
           f.el.style.transform = `translate(${f.rx - sp.x + jitter}px, ${f.ry - sp.y}px) rotate(${f.tilt}deg) scale(${f.lift})`;
         }
@@ -1018,6 +1113,13 @@ export default function Shredder({
     else map.current.delete(key);
   };
 
+  useImperativeHandle(forwardedRef, () => ({
+    feedExternal,
+    get rect() {
+      return rootRef.current ? rootRef.current.getBoundingClientRect() : null;
+    }
+  }));
+
   return (
     <div
       ref={rootRef}
@@ -1063,4 +1165,6 @@ export default function Shredder({
       </div>
     </div>
   );
-}
+});
+
+export default Shredder;
