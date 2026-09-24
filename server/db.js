@@ -73,6 +73,11 @@ CREATE TABLE IF NOT EXISTS addenda(
 CREATE TABLE IF NOT EXISTS report_links(
   a INTEGER NOT NULL REFERENCES reports(id), b INTEGER NOT NULL REFERENCES reports(id),
   linked_by INTEGER NOT NULL REFERENCES users(id), PRIMARY KEY(a, b), CHECK(a < b));
+CREATE TABLE IF NOT EXISTS poi_revisions(
+  id INTEGER PRIMARY KEY, tag_id INTEGER NOT NULL REFERENCES tags(id), description TEXT NOT NULL, aliases TEXT NOT NULL,
+  edited_by INTEGER NOT NULL REFERENCES users(id), edited_at TEXT NOT NULL DEFAULT (${NOW}));
+CREATE TRIGGER IF NOT EXISTS poirev_no_upd BEFORE UPDATE ON poi_revisions BEGIN SELECT RAISE(ABORT, 'history is permanent'); END;
+CREATE TRIGGER IF NOT EXISTS poirev_no_del BEFORE DELETE ON poi_revisions BEGIN SELECT RAISE(ABORT, 'history is permanent'); END;
 CREATE TABLE IF NOT EXISTS poi_profiles(
   tag_id INTEGER PRIMARY KEY REFERENCES tags(id), description TEXT NOT NULL DEFAULT '', aliases TEXT NOT NULL DEFAULT '');
 
@@ -89,6 +94,43 @@ CREATE TRIGGER IF NOT EXISTS add_no_del BEFORE DELETE ON addenda BEGIN SELECT RA
 for (const [col, ddl] of [['confidence', 'TEXT'], ['source_id', 'INTEGER REFERENCES sources(id)']]) {
   if (!db.prepare("SELECT 1 FROM pragma_table_info('reports') WHERE name = ?").get(col)) db.exec(`ALTER TABLE reports ADD COLUMN ${col} ${ddl}`);
 }
+
+// ---- attachments: files clipped to a report's case file ----
+db.exec(`
+CREATE TABLE IF NOT EXISTS attachments(
+  id INTEGER PRIMARY KEY, report_id INTEGER NOT NULL REFERENCES reports(id),
+  filename TEXT NOT NULL, original_name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL,
+  uploaded_by INTEGER NOT NULL REFERENCES users(id), created_at TEXT NOT NULL DEFAULT (${NOW}));
+CREATE TRIGGER IF NOT EXISTS attach_no_del BEFORE DELETE ON attachments BEGIN SELECT RAISE(ABORT, 'attachments are permanent'); END;
+`);
+// The file itself is still never deleted from the database — only deleted_at/deleted_by (soft removal, same
+// as reports) may change on an attachment row. Drop the old blanket no-update trigger in favour of a narrower one.
+for (const [col, ddl] of [['deleted_at', 'TEXT'], ['deleted_by', 'INTEGER REFERENCES users(id)']]) {
+  if (!db.prepare("SELECT 1 FROM pragma_table_info('attachments') WHERE name = ?").get(col)) db.exec(`ALTER TABLE attachments ADD COLUMN ${col} ${ddl}`);
+}
+db.exec(`
+DROP TRIGGER IF EXISTS attach_no_upd;
+CREATE TRIGGER IF NOT EXISTS attach_immutable BEFORE UPDATE OF filename, original_name, mime, size, report_id, uploaded_by, created_at ON attachments
+  BEGIN SELECT RAISE(ABORT, 'attachments are permanent'); END;
+`);
+
+// A Person-of-interest file can be redacted (hiding it and its tag from ordinary use) without ever
+// losing the permanent poi_revisions history — same soft-delete pattern as reports.
+for (const [col, ddl] of [['deleted_at', 'TEXT'], ['deleted_by', 'INTEGER REFERENCES users(id)']]) {
+  if (!db.prepare("SELECT 1 FROM pragma_table_info('poi_profiles') WHERE name = ?").get(col)) db.exec(`ALTER TABLE poi_profiles ADD COLUMN ${col} ${ddl}`);
+}
+
+// ---- indexes: the lookups the app actually runs, so they stay fast as reports pile up ----
+db.exec(`
+CREATE INDEX IF NOT EXISTS idx_reports_deleted_created ON reports(deleted_at, created_at);
+CREATE INDEX IF NOT EXISTS idx_report_tags_tag ON report_tags(tag_id);
+CREATE INDEX IF NOT EXISTS idx_revisions_report ON report_revisions(report_id);
+CREATE INDEX IF NOT EXISTS idx_links_a ON report_links(a);
+CREATE INDEX IF NOT EXISTS idx_links_b ON report_links(b);
+CREATE INDEX IF NOT EXISTS idx_attachments_report ON attachments(report_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_tags_category ON tags(category_id);
+`);
 
 const DEFAULTS = {
   Hold: ['Dawnstar', 'Riften', 'Whiterun', 'Solitude', 'Windhelm', 'Markarth', 'Winterhold', 'Falkreath', 'Morthal'],

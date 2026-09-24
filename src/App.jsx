@@ -1,21 +1,13 @@
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import ClickSpark from './components/ClickSpark/ClickSpark';
 import Dither from './components/Dither/Dither';
-import logo from './assets/Manifesto-Logo.webp';
-import { THEMES } from './themes';
+import { THEMES, BG, hexToRgb01 } from './themes';
 import DecryptedText from './components/Decrypting/decryptText';
 import BorderGlow from './components/BorderGlow/BorderGlow';
 import { api } from './api';
-import { Clock, Dashboard, Compose, Archive, Personnel, Settings, Pois } from './views';
+import ErrorBoundary from './components/ErrorBoundary';
+import { Clock, Dashboard, Compose, Archive, Personnel, SettingsCog } from './views';
 import './index.css';
-
-// card.glb and lanyard.png live in src/assets/lanyard (imported by lanyard.jsx).
-const Lanyard = lazy(() => import('./components/Lanyard/lanyard'));
-const useMedia = (q) => {
-  const [m, setM] = useState(() => matchMedia(q).matches);
-  useEffect(() => { const l = matchMedia(q), f = () => setM(l.matches); l.addEventListener('change', f); return () => l.removeEventListener('change', f); }, [q]);
-  return m;
-};
 
 function Auth({ onIn }) {
   const [mode, setMode] = useState('in'), [callsign, setC] = useState(''), [passphrase, setP] = useState(''), [msg, setMsg] = useState('');
@@ -50,15 +42,15 @@ function Auth({ onIn }) {
 }
 
 export default function App() {
-  const [me, setMe] = useState(undefined), [view, setView] = useState('dash'), [sel, setSel] = useState([]);
-  const [settings, setSettings] = useState({ theme: 'nocturne', font: 'ledger' });
-  const big = useMedia('(min-width: 1800px) and (min-height: 1000px)'), still = useMedia('(prefers-reduced-motion: reduce)');
+  const [me, setMe] = useState(undefined), [view, setView] = useState('dash'), [sel, setSel] = useState([]), [sub, setSub] = useState('reports');
+  const [settings, setSettings] = useState({ theme: 'nocturne', font: 'ledger', animate: true });
   useEffect(() => { api.get('/me').then(setMe).catch(() => setMe(null)); }, []);
   useEffect(() => { if (me) api.get('/settings').then(setSettings).catch(() => {}); }, [me]);
   useEffect(() => { document.documentElement.dataset.theme = settings.theme; document.documentElement.dataset.font = settings.font; }, [settings]);
   const save = (s) => { setSettings(s); api.put('/settings', s); };
+  const openTag = (ids) => { setSel(ids); setSub('reports'); setView('arch'); };
   const T = THEMES[settings.theme] || THEMES.nocturne;
-  const tabs = [['dash', 'Dashboard'], ['file', 'File report'], ['arch', 'Archive'], ['poi', 'Persons of interest'], ...(me?.role === 'warden' ? [['users', 'Personnel']] : []), ['set', 'Settings']];
+  const tabs = [['dash', 'Dashboard'], ['file', 'File report'], ['arch', 'Archive'], ...(me?.role === 'warden' ? [['users', 'Personnel']] : [])];
   let body = null;
   if (me === null) body = <Auth onIn={setMe} />;
   else if (me) body = (
@@ -70,21 +62,25 @@ export default function App() {
         <Clock />
         <span className="dim">{me.callsign}, {me.role} <button onClick={() => api.post('/auth/logout').then(() => setMe(null))}>Leave</button></span>
       </header>
-      {view === 'dash' && <Dashboard me={me} setView={setView} openTag={(ids) => { setSel(ids); setView('arch'); }} />}
-      {view === 'file' && <Compose done={() => setView('arch')} />}
-      {view === 'arch' && <Archive me={me} sel={sel} setSel={setSel} />}
-      {view === 'poi' && <Pois me={me} />}
+      {view === 'dash' && <Dashboard me={me} setView={setView} openTag={openTag} />}
+      {view === 'file' && <Compose me={me} done={() => setView('arch')} />}
+      {view === 'arch' && <Archive me={me} sel={sel} setSel={setSel} sub={sub} setSub={setSub} openTag={openTag} />}
       {view === 'users' && me.role === 'warden' && <Personnel me={me} />}
-      {view === 'set' && <Settings settings={settings} save={save} />}
     </div>
   );
   return (
     <ClickSpark sparkColor={T.spark} sparkCount={10} sparkRadius={24} duration={500}>
-      <div className="bg-dither" aria-hidden="true">
-        <Dither waveColor={T.dither} backgroundColor={T.bg} pixelSize={3} waveSpeed={0.02} colorNum={4} disableAnimation={still} enableMouseInteraction={false} />
-      </div>
-      {me && big && <Suspense fallback={null}><div className="lanyard-fixed"><Lanyard position={[0, 0, 20]} fov={20} frontImage={logo} backImage={logo} imageFit="contain" /></div></Suspense>}
-      {body}
+      <ErrorBoundary silent>
+        <div className="bg-fixed">
+          <Dither
+            waveColor={hexToRgb01(T.spark)} backgroundColor={hexToRgb01(BG[settings.theme] || BG.nocturne)}
+            waveSpeed={0.04} waveFrequency={2.4} waveAmplitude={0.28} colorNum={4} pixelSize={2}
+            disableAnimation={settings.animate === false} enableMouseInteraction={false}
+          />
+        </div>
+      </ErrorBoundary>
+      <ErrorBoundary label="Manifesto">{body}</ErrorBoundary>
+      {me && <SettingsCog settings={settings} save={save} me={me} setMe={setMe} />}
     </ClickSpark>
   );
 }
