@@ -1,3 +1,22 @@
+/*
+import Dither from './Dither';
+
+<div style={{ width: '100%', height: '600px', position: 'relative' }}>
+  <Dither
+    waveColor={[0.5,0.5,0.5]}
+    disableAnimation={false}
+    enableMouseInteraction
+    mouseRadius={0.3}
+    colorNum={4}
+    waveAmplitude={0.32}
+    waveFrequency={3}
+    waveSpeed={0.05}
+    backgroundColor={[0,0,0]}
+/>
+</div>
+
+*/
+
 /* eslint-disable react/no-unknown-property */
 import { useRef, useEffect, forwardRef } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';

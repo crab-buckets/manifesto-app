@@ -1,3 +1,18 @@
+/**
+ import ScrollReveal from './ScrollReveal';
+
+<ScrollReveal
+  baseOpacity={0.1}
+  enableBlur
+  baseRotation={3}
+  blurStrength={4}
+>
+  When does a man die? When he is hit by a bullet? No! When he suffers a disease?
+  No! When he ate a soup made out of a poisonous mushroom?
+  No! A man dies when he is forgotten!
+</ScrollReveal>
+ */
+
 import { useEffect, useRef, useMemo } from 'react';
 import { gsap } from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
