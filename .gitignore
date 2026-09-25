@@ -24,3 +24,6 @@ dist-ssr
 uploads/*
 README.md
 DEPLOY.MD
+manifesto.db
+manifesto.db-shm
+manifesto.db-wal

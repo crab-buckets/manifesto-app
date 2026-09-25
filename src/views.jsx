@@ -12,6 +12,7 @@ import RevealBox from './components/RevealBox/RevealBox';
 import FuseButton from './components/FuseButton/FuseButton';
 import GlideSelect from './components/GlideSelect/GlideSelect';
 import ErrorBoundary from './components/ErrorBoundary';
+import TextType from './components/TextType/TextType';
 import mapImg from './assets/skyrimmap.jpg';
 import { api, sk, dLabel, stamp, dayKey, hue, h12, nowInput, inputToIso } from './api';
 import { THEMES, FONTS } from './themes';
@@ -40,6 +41,15 @@ marked.use({
       renderer(token) { return `<blockquote>${this.parser.parse(token.tokens)}</blockquote>`; },
     },
   ],
+  renderer: {
+    // A link in a case file leads off-site — open it in a new tab rather than navigating away
+    // from the archive, and never hand the target page a reference back to us.
+    // marked@12's Renderer.link is called with classic positional args (href, title, text) —
+    // not a token object — so this must not destructure or reach for this.parser here.
+    link(href, title, text) {
+      return `<a href="${href}" title="${title || ''}" target="_blank" rel="noopener noreferrer">${text}</a>`;
+    },
+  },
 });
 const md = (s) => ({ __html: DOMPurify.sanitize(marked.parse(s || '')) });
 const spoil = (e) => e.target.classList.contains('spoiler') && e.target.classList.toggle('revealed'); // click a spoiler span to reveal it
@@ -295,16 +305,19 @@ function Dossier({ id, prefix, tag, title, meta, excerpt: ex, redacted, onOpen, 
   );
 }
 
-function GrantsPanel({ r }) {
+function GrantsPanel({ r, onChange }) {
   const [users, setUsers] = useState([]), [granted, setGranted] = useState([]), [pick, setPick] = useState('');
   const load = () => api.get(`/reports/${r.id}/grants`).then(setGranted);
   useEffect(() => { api.get('/users').then(setUsers); load(); }, [r.id]);
   const grant = () => { if (!pick) return; api.post(`/reports/${r.id}/grants`, { userId: +pick }).then(() => { setPick(''); load(); }); };
   const revoke = (uid) => api.del(`/reports/${r.id}/grants/${uid}`).then(load);
+  const setClearance = (c) => api.patch(`/reports/${r.id}/clearance`, { clearance: c }).then(onChange);
   const eligible = users.filter((u) => u.role !== 'pending' && u.clearance < r.clearance && !granted.some((g) => g.user_id === u.id));
   return (
     <div className="attach-block">
-      <h3>Individual access (Clearance: {CLEARANCE_LABEL[r.clearance] || r.clearance})</h3>
+      <h3>Individual access</h3>
+      <p className="dim">An agent's own filing always locks to Warden-only, so agents never see each other's reports. Change it here to open this one up more broadly.</p>
+      <ClearanceSelect value={r.clearance} onChange={setClearance} />
       <p className="dim">Everyone below this clearance sees the report scrambled unless granted access here.</p>
       <div>{granted.map((g) => <span key={g.user_id} className="tag-row"><Chip tag={{ name: g.callsign, category: 'Person' }} on />
         <HoldButton size="sm" radius={99} holdTime={800} doneLabel="Gone" backgroundColor="transparent" textColor="var(--dim)"
@@ -319,8 +332,15 @@ function GrantsPanel({ r }) {
   );
 }
 
-export function Report({ r, me, onChange, reveal, onSearch, variant = 'list', shredder }) {
-  const [open, setOpen] = useState(false), [mode, setMode] = useState(null), [f, setF] = useState({}), [pool, setPool] = useState([]), [err, setErr] = useState('');
+export function Report({ r, me, onChange, reveal, variant = 'list', shredder }) {
+  const [open, setOpen] = useState(false), [mode, setMode] = useState(null), [f, setF] = useState({}), [err, setErr] = useState('');
+  const [allTags, setAllTags] = useState([]), [editPicker, setEditPicker] = useState(false);
+  const [seen, setSeen] = useState(false);
+  const unread = r.unread && !seen;
+  const openReport = () => {
+    setOpen(true);
+    if (r.unread && !seen) { setSeen(true); api.post(`/reports/${r.id}/read`).catch(() => {}); }
+  };
   const late = r.filed_at && Math.abs(new Date(r.filed_at) - new Date(r.created_at)) > 6e4;
   const canRedact = !r.deleted_at && me.role === 'warden'; // only a Warden may redact — an author can no longer pull their own report
   const activeShredder = shredder && canRedact ? shredder : null;
@@ -328,23 +348,32 @@ export function Report({ r, me, onChange, reveal, onSearch, variant = 'list', sh
   const hold = r.tags.find((t) => t.category === 'Hold');
   const pick = (m) => {
     setErr(''); setMode(mode === m ? null : m);
-    if (m === 'edit') setF({ title: r.title, body: r.body, confidence: r.confidence || '', source: r.source || '', note: '' });
-    if (m === 'link') { setF({ toId: '' }); api.get('/reports?limit=200').then(setPool); }
+    if (m === 'edit') setF({ title: r.title, body: r.body, confidence: r.confidence || '', source: r.source || '', note: '', removeIds: [], addIds: [] });
     if (m === 'addend') setF({ body: '', confidence: '', source: '' });
   };
   const send = (path, body) => api.post(`/reports/${r.id}/${path}`, body).then(() => { setMode(null); onChange(); }).catch((e) => setErr(e.message));
   const set = (k) => (e) => setF({ ...f, [k]: e.target ? e.target.value : e });
+  // Which tags the edit form currently shows as "on": the report's own tags minus any marked for
+  // removal, plus anything freshly picked that isn't on the report yet.
+  const editTagIds = new Set([...r.tags.map((t) => t.id).filter((id) => !(f.removeIds || []).includes(id)), ...(f.addIds || [])]);
+  const editTagObjs = [...r.tags, ...allTags.filter((t) => (f.addIds || []).includes(t.id))].filter((t, i, arr) => arr.findIndex((x) => x.id === t.id) === i);
+  const loadTags = () => api.get('/tags').then((c) => setAllTags(c.flatMap((x) => x.tags.map((t) => ({ ...t, category: x.name })))));
+  const editToggle = (id) => {
+    const onReport = r.tags.some((t) => t.id === id);
+    if (onReport) setF((cur) => ({ ...cur, removeIds: (cur.removeIds || []).includes(id) ? cur.removeIds.filter((x) => x !== id) : [...(cur.removeIds || []), id] }));
+    else setF((cur) => ({ ...cur, addIds: (cur.addIds || []).includes(id) ? cur.addIds.filter((x) => x !== id) : [...(cur.addIds || []), id] }));
+  };
   const card = variant === 'tile' ? (
-    <Dossier id={r.id} prefix="r" tag={hold ? hold.name : (r.scrambled ? 'Sealed' : 'Case file')} title={r.title} meta={r.scrambled ? 'Beyond your clearance' : stamp(r.created_at)}
-      excerpt={r.scrambled ? '' : excerpt(r.body)} redacted={!!r.deleted_at || r.scrambled} onOpen={() => setOpen(true)} shredder={activeShredder} dragItem={r} />
+    <Dossier id={r.id} prefix="r" tag={hold ? hold.name : (r.scrambled ? 'Sealed' : 'Case file')} title={(unread ? '● ' : '') + r.title} meta={r.scrambled ? 'Beyond your clearance' : stamp(r.created_at)}
+      excerpt={r.scrambled ? '' : excerpt(r.body)} redacted={!!r.deleted_at || r.scrambled} onOpen={openReport} shredder={activeShredder} dragItem={r} />
   ) : (
     <motion.article layoutId={'r' + r.id} transition={SHEET_SPRING}
       className={'report card' + (r.deleted_at || r.scrambled ? ' redacted' : '') + (cd.dragging ? ' dragging-out' : '') + (cd.hot ? ' drag-hot' : '')}
       style={{ x: cd.dx, y: cd.dy, scaleX: cd.sx }} role="button" tabIndex={0}
       onPointerDown={cd.onPointerDown} onPointerMove={cd.onPointerMove}
-      onPointerUp={(e) => cd.onPointerUp(e, e.currentTarget, () => setOpen(true))} onPointerCancel={cd.onPointerCancel}
-      onKeyDown={(e) => e.key === 'Enter' && setOpen(true)}>
-      <h3>{r.title}</h3>
+      onPointerUp={(e) => cd.onPointerUp(e, e.currentTarget, openReport)} onPointerCancel={cd.onPointerCancel}
+      onKeyDown={(e) => e.key === 'Enter' && openReport()}>
+      <h3>{unread && <span className="unread-dot" title="Unread" />}{r.title}</h3>
       <p className="meta">{stamp(r.created_at)}{r.scrambled ? '' : `, ${r.author}`} <Meta conf={r.confidence} /></p>
       <p className="clamp">{r.scrambled ? '' : excerpt(r.body)}</p>
       {(r.deleted_at || r.scrambled) && <span className="dossier-stamp">{r.scrambled ? 'SEALED' : 'REDACTED'}</span>}
@@ -358,9 +387,9 @@ export function Report({ r, me, onChange, reveal, onSearch, variant = 'list', sh
           {r.scrambled ? (
             <>
               <h2>{r.title}</h2>
-              <p className="meta">{stamp(r.created_at)}, Clearance: {CLEARANCE_LABEL[r.clearance] || r.clearance}</p>
+              <p className="meta">{stamp(r.created_at)}</p>
               <div className="md"><p>{r.body}</p></div>
-              <p className="dim">This report exists, but you're not cleared to read it — a report has been filed. It carries the Clearance shown above; a Warden can raise your standing clearance, or grant you this one specifically.</p>
+              <p className="dim">You lack the clearance to understand this report. A Warden can raise your standing clearance, or grant you this one specifically.</p>
               {r.tags.length > 0 && <div>{r.tags.map((t) => <Chip key={t.id} tag={t} on />)}</div>}
             </>
           ) : (<>
@@ -368,8 +397,6 @@ export function Report({ r, me, onChange, reveal, onSearch, variant = 'list', sh
           <p className="meta">{stamp(r.created_at)}, filed by {r.author}{late && ` on ${stamp(r.filed_at)}`}{r.deleted_at && `. Redacted ${stamp(r.deleted_at)}`} <Meta conf={r.confidence} source={r.source} /></p>
           <div className="md" onClick={spoil} dangerouslySetInnerHTML={md(r.body)} />
           <div>{r.tags.map((t) => <Chip key={t.id} tag={t} on />)}</div>
-          {r.links.length > 0 && <p className="meta">Linked to: {r.links.map((l) => (onSearch
-            ? <button key={l.id} className="lnk" onClick={() => { setOpen(false); onSearch(l.title); }}>{l.title}</button> : <span key={l.id} className="lnk">{l.title}</span>))}</p>}
           {r.addenda.length > 0 && (
             <div className="addenda"><h3>Addenda</h3>
               {r.addenda.map((a) => (
@@ -379,10 +406,15 @@ export function Report({ r, me, onChange, reveal, onSearch, variant = 'list', sh
                 </div>))}
             </div>)}
           <Attachments report={r} me={me} onChange={onChange} locked={!!r.deleted_at} />
-          {me.role === 'warden' && !r.deleted_at && <GrantsPanel r={r} />}
-          {r.deleted_at ? (me.role === 'warden' && <button onClick={() => api.post(`/reports/${r.id}/restore`).then(onChange)}>Restore</button>) : (
+          {me.role === 'warden' && !r.deleted_at && <GrantsPanel r={r} onChange={onChange} />}
+          {r.deleted_at ? (me.role === 'warden' && (
             <div className="row">
-              <button onClick={() => pick('edit')}>Edit</button><button onClick={() => pick('link')}>Link report</button>
+              <button onClick={() => api.post(`/reports/${r.id}/restore`).then(onChange)}>Restore</button>
+              <HB danger done="Purged" onHold={() => api.del(`/reports/${r.id}/purge`).then(() => { setOpen(false); onChange(); })}>Hold to purge forever</HB>
+            </div>
+          )) : (
+            <div className="row">
+              <button onClick={() => pick('edit')}>Edit</button>
               <button onClick={() => pick('addend')}>Add addendum</button>
               {r.revisions.length > 0 && <button onClick={() => pick('hist')}>History ({r.revisions.length})</button>}
               {canRedact && <HB danger done="Redacted" onHold={() => send('redact', {})}>Hold to redact</HB>}
@@ -391,14 +423,17 @@ export function Report({ r, me, onChange, reveal, onSearch, variant = 'list', sh
           {mode === 'edit' && (
             <div className="form"><input value={f.title} onChange={set('title')} /><textarea rows={8} value={f.body} onChange={set('body')} />
               <div className="row"><ConfSelect value={f.confidence} onChange={set('confidence')} /><SourceField value={f.source} onChange={set('source')} /></div>
+              <div>{editTagObjs.filter((t) => editTagIds.has(t.id)).map((t) => (
+                  <span key={t.id} className="tag-row"><Chip tag={t} on onClick={() => editToggle(t.id)} />
+                    <HoldButton size="sm" radius={99} holdTime={600} doneLabel="Off" backgroundColor="transparent" textColor="var(--dim)"
+                      fillColor="#a33a34" glow={false} resetAfter={400} className="tag-del" onHold={() => editToggle(t.id)}>×</HoldButton></span>))}
+                <button type="button" className="plus" onClick={() => { if (!allTags.length) loadTags(); setEditPicker(true); }} aria-label="Add tags">+ Tags</button></div>
+              <p className="dim">A name still mentioned in the text is re-tagged automatically — remove it here only if it shouldn't apply going forward.</p>
               <input placeholder="Why are you changing it? (kept in the history)" value={f.note} onChange={set('note')} />
               <p className="dim">The original and every earlier version stay in the history.</p>
-              <button className="primary" onClick={() => send('edit', f)}>Save revision</button></div>)}
-          {mode === 'link' && (
-            <div className="form row">
-              <Sel ariaLabel="Report to link" placeholder="Choose a report to link..." value={f.toId} onChange={set('toId')}
-                options={pool.filter((p) => p.id !== r.id).map((p) => ({ value: p.id, label: `${p.title} (${dLabel(sk(p.created_at))})` }))} />
-              <button className="primary" onClick={() => send('links', { toId: +f.toId })}>Link</button></div>)}
+              <button className="primary" onClick={() => send('edit', { ...f, addTagIds: f.addIds, removeTagIds: f.removeIds })}>Save revision</button></div>)}
+          {editPicker && <TagPicker tags={allTags} on={editTagIds} toggle={editToggle} close={() => setEditPicker(false)}
+            canDelete={me.role === 'warden'} onDeleted={(id) => { setF((cur) => ({ ...cur, addIds: (cur.addIds || []).filter((x) => x !== id) })); loadTags(); }} />}
           {mode === 'addend' && (
             <div className="form"><textarea rows={5} placeholder="Additional information, from this or a later source..." value={f.body} onChange={set('body')} />
               <div className="row"><ConfSelect value={f.confidence} onChange={set('confidence')} /><SourceField value={f.source} onChange={set('source')} /></div>
@@ -528,12 +563,15 @@ export function Compose({ done, me }) {
             </div>
             <textarea rows={10} placeholder="Markdown is supported. Names of holds, factions, creatures and persons of interest are tagged for you."
               value={body} onChange={(e) => setBody(e.target.value)} />
-            <div className="row" style={{ marginBottom: 8 }}><ConfSelect value={conf} onChange={setConf} /><SourceField value={source} onChange={setSource} /><ClearanceSelect value={clearance} onChange={setClearance} /></div>
+            <div className="row" style={{ marginBottom: 8 }}><ConfSelect value={conf} onChange={setConf} /><SourceField value={source} onChange={setSource} />
+              {me.role === 'warden' && <ClearanceSelect value={clearance} onChange={setClearance} />}</div>
             <div>{tags.filter((t) => on.has(t.id)).map((t) => <Chip key={t.id} tag={t} on onClick={() => !auto.includes(t.id) && toggle(t.id)} />)}
               <button type="button" className="plus" onClick={() => setPicker(true)} aria-label="Add tags">+ Tags</button></div>
           </fieldset>
           {err && <p className="bad">{err}</p>}
-          <p className="dim">{clearance > 0 ? `Below Clearance: ${CLEARANCE_LABEL[clearance]}, this report reads as scrambled nonsense — a Warden can still grant it to specific people.` : 'Everyone can read this one.'}</p>
+          <p className="dim">{me.role === 'warden'
+            ? (clearance > 0 ? `Below Clearance: ${CLEARANCE_LABEL[clearance]}, this report reads as scrambled nonsense — a Warden can still grant it to specific people.` : 'Everyone can read this one.')
+            : 'Filed at Warden-only clearance — only you and a Warden can read it, unless a Warden opens it up further.'}</p>
           <p className="dim">After you press it, the fuse burns for six seconds. Press Undo before it ends and nothing is sent.</p>
           <FuseButton label="Lodge report" doneLabel="Lodged" undoLabel="Undo" undoWindow={6000} size="lg" radius={10} fuse="outline"
             background="#27272a" color="#f5f5f5" fuseColor="#e0b94a" disabled={!title.trim() || !body.trim()} onCommit={arm} onUndo={undo} onFuseEnd={fire} />
@@ -570,8 +608,9 @@ function ReportsArchive({ me, sel, setSel, view }) {
     width: () => shredRef.current?.rect?.width,
     drop: (el, item, x, y) => shredRef.current?.feedExternal(el, item, x, y),
   };
+  const isWarden = me.role === 'warden';
   return (
-    <div className="arch">
+    <div className={isWarden ? 'arch' : 'arch solo'}>
       <div>
         <div className="panel">
           <input placeholder="Search the contents of every report..." value={q} onChange={(e) => setQ(e.target.value)} />
@@ -579,24 +618,26 @@ function ReportsArchive({ me, sel, setSel, view }) {
             <button type="button" className="plus" onClick={() => setPicker(true)}>+ Filter by tag</button></div>
           <div className="row"><span className="dim">{rows.length} report(s)</span>
             {sel.length > 0 && <button onClick={() => setSel([])}>Clear filters</button>}
-            {me.role === 'warden' && <label><input type="checkbox" checked={sd} onChange={(e) => setSd(e.target.checked)} /> show redacted</label>}</div>
+            {isWarden && <label><input type="checkbox" checked={sd} onChange={(e) => setSd(e.target.checked)} /> show redacted</label>}</div>
         </div>
         <div className={view === 'tile' ? 'tiles' : undefined}>
-          {rows.map((r) => <Report key={r.id} r={r} me={me} onChange={() => setK((x) => x + 1)} onSearch={setQ} variant={view} shredder={shredder} />)}
+          {rows.map((r) => <Report key={r.id} r={r} me={me} onChange={() => setK((x) => x + 1)} variant={view} shredder={isWarden ? shredder : null} />)}
         </div>
         {picker && <TagPicker tags={stats} on={new Set(sel)} toggle={flip} close={() => setPicker(false)}
-          canDelete={me.role === 'warden'} onDeleted={(id) => { setSel((s) => s.filter((x) => x !== id)); setK((x) => x + 1); }} />}
+          canDelete={isWarden} onDeleted={(id) => { setSel((s) => s.filter((x) => x !== id)); setK((x) => x + 1); }} />}
       </div>
-      <aside className="shred-rail">
-        <h3>Redaction shredder</h3>
-        <p className="dim">Drag a report — a list row or a dossier tile — into the slot to redact it. It stays in the vault; a Warden can restore it.</p>
-        <ErrorBoundary label="The shredder">
-          <div className="shredder-mount">
-            <Shredder ref={shredRef} items={[]} renderItem={() => null} width={280} height={220}
-              fallHeight={140} color={shredColor} slitColor={shredSlit} onShred={shred} />
-          </div>
-        </ErrorBoundary>
-      </aside>
+      {isWarden && (
+        <aside className="shred-rail">
+          <h3>Redaction shredder</h3>
+          <p className="dim">Drag a report — a list row or a dossier tile — into the slot to redact it. It stays in the vault; a Warden can restore it, or purge it for good once it's redacted.</p>
+          <ErrorBoundary label="The shredder">
+            <div className="shredder-mount">
+              <Shredder ref={shredRef} items={[]} renderItem={() => null} width={280} height={220}
+                fallHeight={140} color={shredColor} slitColor={shredSlit} onShred={shred} />
+            </div>
+          </ErrorBoundary>
+        </aside>
+      )}
     </div>
   );
 }
@@ -611,6 +652,7 @@ function FactionsArchive({ me }) {
     api.post('/factions', { name: newName }).then(() => { setNewName(''); load(); }).catch((e) => setErr(e.message));
   };
   const deleteFaction = (id) => api.del(`/factions/${id}`).then(load);
+  const setClearance = (id, c) => api.patch(`/factions/${id}/clearance`, { clearance: c }).then(load).catch((e) => setErr(e.message));
   const saveMember = () => {
     const { factionId, id, name, rank, notes } = memberForm;
     const p = id ? api.put(`/faction-members/${id}`, { name, rank, notes }) : api.post(`/factions/${factionId}/members`, { name, rank, notes });
@@ -621,27 +663,32 @@ function FactionsArchive({ me }) {
     <div>
       <div className="panel">
         <h2>Faction rosters</h2>
-        <p className="dim">Who's in a faction and their rank — a living list, edited in place by whoever's tracking it, not a case file.</p>
+        <p className="dim">Who's in a faction and their rank — a living list, edited in place by whoever's tracking it, not a case file. A Warden can raise a faction's clearance to seal its roster the same way a report is sealed.</p>
         <div className="row"><input placeholder="New faction name" value={newName} onChange={(e) => setNewName(e.target.value)} /><button onClick={createFaction}>Create faction</button></div>
         {err && <p className="bad">{err}</p>}
       </div>
       {list.map((f) => (
         <div key={f.id} className="panel">
           <div className="row"><h3 style={{ flex: 1 }}>{f.name}</h3>
-            <button className="plus" onClick={() => setMemberForm({ factionId: f.id, name: '', rank: '', notes: '' })}>+ Member</button>
+            {!f.scrambled && <button className="plus" onClick={() => setMemberForm({ factionId: f.id, name: '', rank: '', notes: '' })}>+ Member</button>}
+            {me.role === 'warden' && <ClearanceSelect value={f.clearance} onChange={(c) => setClearance(f.id, c)} />}
             {me.role === 'warden' && <HB danger done="Gone" onHold={() => deleteFaction(f.id)}>Hold to disband</HB>}</div>
-          <table><tbody>
-            {f.members.map((m) => (
-              <tr key={m.id}>
-                <td>{m.name}</td><td className="dim">{m.rank}</td><td className="dim">{m.notes}</td>
-                <td className="dim">upd. {stamp(m.updated_at)} by {m.updated_by}</td>
-                <td className="row">
-                  <button onClick={() => setMemberForm({ factionId: f.id, id: m.id, name: m.name, rank: m.rank, notes: m.notes })}>Edit</button>
-                  <HB danger done="Gone" onHold={() => removeMember(m.id)}>Hold to remove</HB>
-                </td>
-              </tr>))}
-            {!f.members.length && <tr><td className="dim">No members recorded yet.</td></tr>}
-          </tbody></table>
+          {f.scrambled ? (
+            <p className="dim">You lack the clearance to view this faction's roster. A Warden can raise your standing clearance, or lower this faction's.</p>
+          ) : (
+            <table><tbody>
+              {f.members.map((m) => (
+                <tr key={m.id}>
+                  <td>{m.name}</td><td className="dim">{m.rank}</td><td className="dim">{m.notes}</td>
+                  <td className="dim">upd. {stamp(m.updated_at)} by {m.updated_by}</td>
+                  <td className="row">
+                    <button onClick={() => setMemberForm({ factionId: f.id, id: m.id, name: m.name, rank: m.rank, notes: m.notes })}>Edit</button>
+                    <HB danger done="Gone" onHold={() => removeMember(m.id)}>Hold to remove</HB>
+                  </td>
+                </tr>))}
+              {!f.members.length && <tr><td className="dim">No members recorded yet.</td></tr>}
+            </tbody></table>
+          )}
         </div>))}
       {!list.length && <p className="dim">No factions tracked yet.</p>}
       {memberForm && (
@@ -658,22 +705,193 @@ function FactionsArchive({ me }) {
   );
 }
 
+// A note's text types into view the first time its bubble mounts — same "something covert is
+// arriving" feel the old scramble effect had, just a plain typewriter now.
+function NoteBubble({ n, mine, otherLabel, manage }) {
+  const [typed, setTyped] = useState(false);
+  const [editing, setEditing] = useState(false), [draft, setDraft] = useState(n.body);
+  const label = n.sender === 'warden' ? 'The Wardens' : (mine ? 'You' : otherLabel);
+  const saveEdit = () => {
+    if (!draft.trim()) return;
+    manage.onEdit(n.id, draft.trim()).then(() => setEditing(false));
+  };
+  // deleted_at/edited_at only ever come back to a Warden's own thread view (manage truthy) — a
+  // member's GET never includes a deleted message at all, or these two fields on any message —
+  // so this marker is never visible to the person the note was about.
+  const deleted = manage && !!n.deleted_at;
+  return (
+    <div className={'note-bubble' + (mine ? ' mine' : '') + (deleted ? ' note-deleted' : '')}>
+      <div className="note-from dim">
+        {label} · {stamp(n.created_at)}
+        {manage && !!n.edited_at && !deleted && <span className="note-flag">edited</span>}
+        {deleted && <span className="note-flag note-flag-del">deleted — hidden from them</span>}
+        {manage && !editing && (
+          <span className="note-manage">
+            {deleted ? (
+              <button className="linklike" onClick={() => manage.onRestore(n.id)}>restore</button>
+            ) : (<>
+              <button className="linklike" onClick={() => { setDraft(n.body); setEditing(true); }}>edit</button>
+              <button className="linklike" onClick={() => manage.onDelete(n.id)}>delete</button>
+            </>)}
+          </span>
+        )}
+      </div>
+      <div className="note-body">
+        {editing ? (
+          <div className="row">
+            <textarea rows={2} value={draft} onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveEdit(); } }} />
+            <button className="primary" onClick={saveEdit} disabled={!draft.trim()}>Save</button>
+            <button onClick={() => setEditing(false)}>Cancel</button>
+          </div>
+        ) : typed || deleted ? (
+          // The typing effect only makes sense for plain text — once it's finished, swap to the
+          // same markdown renderer the rest of the app uses, so a note can carry the same
+          // formatting (bold, links, spoilers, etc.) as everywhere else. A deleted message skips
+          // straight to this (no reason to replay the reveal for something already sent).
+          <div className="md" onClick={spoil} dangerouslySetInnerHTML={md(n.body)} />
+        ) : (
+          <TextType text={n.body} speed={16} onComplete={() => setTyped(true)} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function WardenNotes() {
+  const [threads, setThreads] = useState([]), [sel, setSel] = useState(null), [thread, setThread] = useState({ hidden: false, messages: [] }), [body, setBody] = useState(''), [err, setErr] = useState('');
+  const loadThreads = () => api.get('/notes/threads').then(setThreads);
+  useEffect(() => { loadThreads(); }, []);
+  const openThread = (t) => {
+    setSel(t); setErr('');
+    api.get(`/notes/threads/${t.user_id}`).then(setThread).then(loadThreads);
+  };
+  const refresh = () => sel && api.get(`/notes/threads/${sel.user_id}`).then(setThread).then(loadThreads);
+  const send = () => {
+    if (!body.trim() || !sel) return;
+    api.post(`/notes/threads/${sel.user_id}`, { body }).then(() => { setBody(''); refresh(); }).catch((e) => setErr(e.message));
+  };
+  const toggleHidden = () => sel && api.patch(`/notes/threads/${sel.user_id}/hidden`, { hidden: !thread.hidden }).then(refresh);
+  const manage = {
+    onEdit: (mid, editBody) => api.patch(`/notes/threads/${sel.user_id}/messages/${mid}`, { body: editBody }).then(refresh),
+    onDelete: (mid) => api.del(`/notes/threads/${sel.user_id}/messages/${mid}`).then(refresh),
+    onRestore: (mid) => api.post(`/notes/threads/${sel.user_id}/messages/${mid}/restore`).then(refresh),
+  };
+  return (
+    <div className="notes-wrap">
+      <div className="notes-list panel">
+        <h3>Chats</h3>
+        <p className="dim">Open a chat with any agent. They'll only ever see it came from "The Wardens" — never which one.</p>
+        {threads.map((t) => (
+          <button key={t.user_id} className={'notes-thread' + (sel?.user_id === t.user_id ? ' on' : '') + (t.hidden ? ' hidden-thread' : '')} onClick={() => openThread(t)}>
+            <span>{t.callsign}{t.hidden ? ' (hidden)' : ''}</span>{t.unread > 0 && <b className="notes-badge">{t.unread}</b>}
+          </button>))}
+        {!threads.length && <p className="dim">No agents yet.</p>}
+      </div>
+      <div className="notes-thread-pane panel">
+        {sel ? (
+          <>
+            <div className="row">
+              <h3>{sel.callsign}</h3>
+              <span className="spacer" />
+              <button onClick={toggleHidden}>{thread.hidden ? 'Unhide from them' : 'Hide from them'}</button>
+            </div>
+            {thread.hidden && <p className="dim">This chat is pulled from their Archive — they can't see it, or that it exists.</p>}
+            <div className="notes-scroll">
+              {thread.messages.map((n) => (
+                <NoteBubble key={n.id} n={n} mine={n.sender === 'warden'} otherLabel={sel.callsign}
+                  manage={n.sender === 'warden' ? manage : null} />
+              ))}
+              {!thread.messages.length && <p className="dim">No notes yet. Say something.</p>}
+            </div>
+            <div className="row">
+              <textarea rows={2} placeholder="Write a note..." value={body} onChange={(e) => setBody(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} />
+              <button className="primary" onClick={send} disabled={!body.trim()}>Send</button>
+            </div>
+            {err && <p className="bad">{err}</p>}
+          </>
+        ) : <p className="dim">Pick an agent to open a chat.</p>}
+      </div>
+    </div>
+  );
+}
+
+function MemberNotes({ onRead }) {
+  const [msgs, setMsgs] = useState([]), [body, setBody] = useState(''), [err, setErr] = useState('');
+  // Opening this tab is what marks the Wardens' messages read server-side (GET /notes/mine) — bump
+  // the tab's own status right after, rather than waiting for its next slow poll, so the badge
+  // clears the moment the member actually opens the tab, as asked.
+  const load = () => api.get('/notes/mine').then((m) => { setMsgs(m); onRead?.(); });
+  useEffect(() => { load(); }, []);
+  const send = () => {
+    if (!body.trim()) return;
+    api.post('/notes/mine', { body }).then(() => { setBody(''); load(); }).catch((e) => setErr(e.message));
+  };
+  return (
+    <div className="notes-thread-pane panel">
+      <h3>Notes from the Wardens</h3>
+      <p className="dim">Only you and the Wardens can see this — and you'll never know which Warden sent a note.</p>
+      <div className="notes-scroll">
+        {msgs.map((n) => <NoteBubble key={n.id} n={n} mine={n.sender === 'member'} />)}
+        {!msgs.length && <p className="dim">Nothing yet.</p>}
+      </div>
+      <div className="row">
+        <textarea rows={2} placeholder="Reply..." value={body} onChange={(e) => setBody(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} />
+        <button className="primary" onClick={send} disabled={!body.trim()}>Send</button>
+      </div>
+      {err && <p className="bad">{err}</p>}
+    </div>
+  );
+}
+
+function NotesArchive({ me, onRead }) {
+  return me.role === 'warden' ? <WardenNotes /> : <MemberNotes onRead={onRead} />;
+}
+
+// A member's Notes tab stays out of the nav entirely until a Warden has messaged them first — there's
+// nothing to open before that, so there's nothing to show. This also drives the tab's unread badge,
+// polled lightly and cleared immediately (via the returned refresh()) the moment MemberNotes' own
+// GET /notes/mine marks everything read, rather than waiting for the next slow poll.
+export function useNotesStatus(me) {
+  const [status, setStatus] = useState({ open: me.role === 'warden', unread: 0 });
+  const refresh = () => api.get('/notes/status').then(setStatus).catch(() => {});
+  useEffect(() => {
+    if (me.role === 'warden') return;
+    let stop = false;
+    const poll = () => api.get('/notes/status').then((s) => { if (!stop) setStatus(s); }).catch(() => {});
+    poll();
+    const id = setInterval(poll, 15000);
+    return () => { stop = true; clearInterval(id); };
+  }, [me.role]);
+  return [status, refresh];
+}
+
 export function Archive({ me, sel, setSel, sub, setSub, openTag }) {
   const [view, setView] = useState('list');
+  const [notesStatus, refreshNotesStatus] = useNotesStatus(me);
+  const notesOpen = me.role === 'warden' || notesStatus.open;
+  const tabs = [['reports', 'Reports'], ['pois', 'Persons of interest'], ['factions', 'Factions'], ...(notesOpen ? [['notes', 'Notes']] : [])];
+  useEffect(() => { if (sub === 'notes' && !notesOpen) setSub('reports'); }, [notesOpen, sub, setSub]);
+  const noListView = sub === 'factions' || sub === 'notes';
   return (
     <ErrorBoundary label="The archive">
       <div className="row subnav">
-        {[['reports', 'Reports'], ['pois', 'Persons of interest'], ['factions', 'Factions']].map(([k, l]) => (
-          <button key={k} className={sub === k ? 'tab on' : 'tab'} onClick={() => setSub(k)}>{l}</button>))}
+        {tabs.map(([k, l]) => (
+          <button key={k} className={sub === k ? 'tab on' : 'tab'} onClick={() => setSub(k)}>
+            {l}{k === 'notes' && me.role !== 'warden' && notesStatus.unread > 0 && <b className="notes-badge">{notesStatus.unread}</b>}
+          </button>))}
         <span className="spacer" />
-        {sub !== 'factions' && (<>
+        {!noListView && (<>
           <button className={view === 'list' ? 'tab on' : 'tab'} onClick={() => setView('list')}>List</button>
           <button className={view === 'tile' ? 'tab on' : 'tab'} onClick={() => setView('tile')}>Dossiers</button>
         </>)}
       </div>
       {sub === 'reports' ? <ReportsArchive me={me} sel={sel} setSel={setSel} view={view} />
         : sub === 'pois' ? <PoisArchive me={me} openTag={openTag} view={view} />
-        : <FactionsArchive me={me} />}
+        : sub === 'factions' ? <FactionsArchive me={me} />
+        : notesOpen ? <NotesArchive me={me} onRead={refreshNotesStatus} /> : null}
     </ErrorBoundary>
   );
 }
@@ -779,16 +997,19 @@ function PoiCard({ p, me, reload, openTag, variant = 'list' }) {
   const save = () => api.put('/pois/' + p.id, form).then(() => { setForm(null); reload(); loadRows(); }).catch((e) => setErr(e.message));
   const redacted = !!p.deleted_at;
   const setRedaction = (on) => api.post(`/pois/${p.id}/${on ? 'redact' : 'restore'}`).then(reload).catch((e) => setErr(e.message));
-  const blurb = redacted ? 'This file has been redacted.' : (excerpt(p.description) || 'No description yet.');
+  const setClearance = (c) => api.patch(`/pois/${p.id}/clearance`, { clearance: c }).then(reload).catch((e) => setErr(e.message));
+  const purge = () => api.del(`/pois/${p.id}/purge`).then(() => { setOpen(false); reload(); }).catch((e) => setErr(e.message));
+  const blurb = redacted ? 'This file has been redacted.' : p.scrambled ? 'Beyond your clearance.' : (excerpt(p.description) || 'No description yet.');
   const card = variant === 'tile' ? (
     <Dossier id={p.id} prefix="p" tag="Person of interest" title={p.name}
-      meta={`${p.n} report(s)${p.aliases ? `, AKA ${p.aliases}` : ''}`} excerpt={blurb} redacted={redacted} onOpen={() => setOpen(true)} />
+      meta={`${p.n} report(s)${p.aliases ? `, AKA ${p.aliases}` : ''}`} excerpt={blurb} redacted={redacted || p.scrambled} onOpen={() => setOpen(true)} />
   ) : (
-    <motion.article layoutId={'p' + p.id} transition={SHEET_SPRING} className={'report card' + (redacted ? ' redacted' : '')} role="button" tabIndex={0} onClick={() => setOpen(true)} onKeyDown={(e) => e.key === 'Enter' && setOpen(true)}>
+    <motion.article layoutId={'p' + p.id} transition={SHEET_SPRING} className={'report card' + (redacted || p.scrambled ? ' redacted' : '')} role="button" tabIndex={0} onClick={() => setOpen(true)} onKeyDown={(e) => e.key === 'Enter' && setOpen(true)}>
       <h3>{p.name}</h3>
       <p className="meta">{p.n} report(s){p.aliases && `, also known as ${p.aliases}`}</p>
       <p className="clamp">{blurb}</p>
       {redacted && <span className="dossier-stamp">REDACTED</span>}
+      {!redacted && p.scrambled && <span className="dossier-stamp">SEALED</span>}
     </motion.article>
   );
   return (
@@ -799,22 +1020,29 @@ function PoiCard({ p, me, reload, openTag, variant = 'list' }) {
           <h2>{p.name}</h2>
           {p.aliases && <p className="meta">Also known as {p.aliases}</p>}
           <p className="meta">{rows.length} report(s){rows.length > 0 && `. First seen ${stamp(rows.at(-1).created_at)}. Last seen ${stamp(rows[0].created_at)}`}{redacted && '. Redacted'}</p>
+          {p.scrambled && !redacted && (
+            <p className="dim">This file exists, but you're not cleared to read it. A Warden can raise your standing clearance, or lower this file's.</p>
+          )}
           {form ? (
             <div className="form"><input placeholder="Aliases, separated by commas (also tagged automatically)" value={form.aliases} onChange={(e) => setForm({ ...form, aliases: e.target.value })} />
               <textarea rows={6} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
               {err && <p className="bad">{err}</p>}
               <div className="row"><button className="primary" onClick={save}>Save</button><button onClick={() => setForm(null)}>Cancel</button></div></div>
-          ) : (
+          ) : (!p.scrambled || redacted) && (
             <>
               <div className="md" onClick={spoil} dangerouslySetInnerHTML={md((redacted ? '*This file has been redacted. Its contents are hidden and its tag no longer applies to reports.*' : p.description) || '*No description yet.*')} />
               <div className="row">
                 {!redacted && <button onClick={() => setForm(p)}>Edit file</button>}
                 <button className="primary" onClick={() => { setOpen(false); openTag([p.id]); }}>Read their reports</button>
                 {me.role === 'warden' && (redacted
-                  ? <HB done="Restored" onHold={() => setRedaction(false)}>Hold to restore</HB>
+                  ? <><HB done="Restored" onHold={() => setRedaction(false)}>Hold to restore</HB>
+                      <HB danger done="Purged" onHold={purge}>Hold to purge forever</HB></>
                   : <HB danger done="Redacted" onHold={() => setRedaction(true)}>Hold to redact</HB>)}
               </div>
             </>)}
+          {me.role === 'warden' && !redacted && (
+            <p className="dim">Clearance: <ClearanceSelect value={p.clearance ?? MAX_CLEARANCE} onChange={setClearance} /></p>
+          )}
           {err && <p className="bad">{err}</p>}
           <h3>Timeline</h3>
           {rows.map((r) => <div key={r.id} className="mini"><b>{r.title}</b><span className="meta">{stamp(r.created_at)}, {r.author} <Meta conf={r.confidence} /></span></div>)}
@@ -834,12 +1062,16 @@ function PoisArchive({ me, openTag, view }) {
       <div className="panel">
         <input placeholder="Search persons of interest..." value={q} onChange={(e) => setQ(e.target.value)} />
         <div className="row"><span className="dim">{shown.length} file(s)</span>
-          <button className="plus" onClick={() => setForm({ name: '', aliases: '', description: '' })}>+ New person</button>
+          <button className="plus" onClick={() => setForm({ name: '', aliases: '', description: '', clearance: MAX_CLEARANCE })}>+ New person</button>
           {me.role === 'warden' && <label><input type="checkbox" checked={sd} onChange={(e) => setSd(e.target.checked)} /> show redacted</label>}</div>
         {form && (
           <div className="form"><input placeholder="Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
             <input placeholder="Aliases, separated by commas" value={form.aliases} onChange={(e) => setForm({ ...form, aliases: e.target.value })} />
             <textarea rows={5} placeholder="Description, allegiances, habits. Markdown works." value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+            {me.role === 'warden' && <ClearanceSelect value={form.clearance} onChange={(c) => setForm({ ...form, clearance: c })} />}
+            <p className="dim">{me.role === 'warden'
+              ? 'A file always opens at Warden-only clearance unless lowered here.'
+              : 'This file opens at Warden-only clearance — a Warden can open it up afterward.'}</p>
             {err && <p className="bad">{err}</p>}
             <div className="row"><button className="primary" onClick={create}>Open file</button><button onClick={() => setForm(null)}>Cancel</button></div></div>)}
       </div>

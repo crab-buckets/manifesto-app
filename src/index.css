@@ -1,9 +1,10 @@
 @import url('https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,400;0,600;1,400&family=IM+Fell+English:ital@0;1&family=Special+Elite&family=Courier+Prime&family=Source+Sans+3:wght@400;600&family=Source+Serif+4:wght@400;600&display=swap');
 
 :root {
-  --bg: #0a0a0b; --panel: #131315; --line: #2a2a2c; --ink: #e6dcc0; --dim: #948d78;
-  --brass: #b6913e; --wax: #a83a32; --teal: #4c8d82;
-  --cell: #1b1b1d; --head: 'IM Fell English', Georgia, serif; --body: 'Crimson Pro', Georgia, serif;
+  /* Nocturne: strictly black, white and gray — no hue anywhere in the chrome. */
+  --bg: #0a0a0a; --panel: #141414; --line: #2e2e2e; --ink: #ececec; --dim: #8f8f8f;
+  --brass: #f2f2f2; --wax: #a3a3a3; --teal: #c9c9c9;
+  --cell: #1c1c1c; --head: 'IM Fell English', Georgia, serif; --body: 'Crimson Pro', Georgia, serif;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -66,6 +67,12 @@ nav { display: flex; gap: 6px; flex-wrap: wrap; }
 .chip.on { background: hsl(var(--h) 40% 30%); } .chip b { margin-left: 6px; font-weight: 600; opacity: .7; }
 .md blockquote { border-left: 3px solid var(--brass); margin: 8px 0; padding-left: 12px; color: var(--dim); }
 .md code { background: var(--cell); padding: 1px 5px; border-radius: 3px; } .md a { color: var(--teal); }
+.md pre { background: var(--cell); padding: 10px 12px; border-radius: 6px; overflow-x: auto; }
+.md pre code { background: none; padding: 0; }
+.md ul, .md ol { padding-left: 1.4em; margin: 6px 0; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 10px 0 4px; line-height: 1.25; }
+.md h1 { font-size: 1.4em; } .md h2 { font-size: 1.25em; } .md h3 { font-size: 1.1em; }
+.md hr { border: none; border-top: 1px solid var(--line); margin: 10px 0; }
 table { width: 100%; border-collapse: collapse; } td { padding: 8px; border-bottom: 1px solid var(--line); }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 
@@ -77,6 +84,13 @@ table { width: 100%; border-collapse: collapse; } td { padding: 8px; border-bott
 [data-theme=college] { --bg: #0a1420; --panel: #10202f; --line: #24445c; --ink: #dfeaf5; --dim: #85a0b5; --brass: #6fb0e0; --wax: #b5483f; --teal: #4f8fb0; --cell: #142a3c; }
 [data-theme=forsworn] { --bg: #1a1108; --panel: #26190e; --line: #4a3520; --ink: #ecdcc0; --dim: #a68f6e; --brass: #c96a3a; --wax: #8f2a2a; --teal: #6f8a4a; --cell: #30200f; }
 [data-theme=blackreach] { --bg: #050a0c; --panel: #0b1517; --line: #1c363a; --ink: #cdeee8; --dim: #6f9a94; --brass: #3fd6c0; --wax: #a33a34; --teal: #2fb0a0; --cell: #0f1e21; }
+/* Nocturne is meant to be strictly grayscale, but a tag chip's border/fill is colored by its
+   category (hue stored in --h, set inline per chip) everywhere else in the app — override that
+   here so nothing in this theme carries a hue, even a chip's category color. */
+[data-theme=nocturne] .chip { border-color: var(--line); background: transparent; }
+[data-theme=nocturne] .chip.on { background: var(--cell); border-color: var(--dim); }
+[data-theme=nocturne] .heat .l1 { background: #262626; } [data-theme=nocturne] .heat .l2 { background: #484848; }
+[data-theme=nocturne] .heat .l3 { background: #757575; } [data-theme=nocturne] .heat .l4 { background: #e8e8e8; }
 [data-font=typewriter] { --head: 'Special Elite', 'Courier New', monospace; --body: 'Courier Prime', 'Courier New', monospace; }
 [data-font=clean] { --head: 'Source Serif 4', Georgia, serif; --body: 'Source Sans 3', system-ui, sans-serif; }
 
@@ -103,6 +117,7 @@ header { background: var(--bg); }
 
 /* ---- archive with shredder rail ---- */
 .arch { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 18px; align-items: start; }
+.arch.solo { grid-template-columns: 1fr; }
 @media (max-width: 1000px) { .arch { grid-template-columns: 1fr; } }
 .shred-rail {
   position: sticky; top: 12px; max-height: calc(100svh - 24px); overflow-y: auto; isolation: isolate;
@@ -158,7 +173,6 @@ select { padding: 6px 10px; margin-bottom: 8px; } .row select, .row input { marg
 .src { font-style: italic; }
 .form { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
 .form details { padding: 6px 0; border-bottom: 1px solid var(--line); } .form summary { cursor: pointer; }
-.lnk { margin: 0 6px 0 0; padding: 0 8px; border-radius: 4px; font-size: .85rem; }
 .plus { border-radius: 99px; padding: 1px 12px; font-size: .85rem; border-style: dashed; }
 .modal { position: fixed; inset: 0; z-index: 20; background: rgba(0, 0, 0, .6); display: grid; place-items: center; padding: 20px; }
 .modal-card { width: min(640px, 100%); max-height: 85svh; overflow-y: auto; margin: 0; }
@@ -195,6 +209,37 @@ fieldset.bare { border: 0; padding: 0; margin: 0; min-width: 0; }
 .spoiler { background: var(--ink); color: transparent; border-radius: 3px; padding: 0 2px; cursor: pointer; transition: background .15s, color .15s; }
 .spoiler.revealed { background: color-mix(in srgb, var(--cell) 65%, transparent); color: inherit; }
 .md u { text-decoration: underline; text-underline-offset: 2px; }
+
+/* ---- notes: an anonymous chat thread between the Wardens (collectively) and one member ---- */
+.notes-wrap { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 18px; align-items: start; }
+@media (max-width: 800px) { .notes-wrap { grid-template-columns: 1fr; } }
+.notes-list { display: flex; flex-direction: column; gap: 4px; }
+.notes-thread {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  text-align: left; padding: 8px 10px; border-radius: 6px; background: transparent; border-color: transparent;
+}
+.notes-thread:hover { background: var(--cell); }
+.notes-thread.on { background: var(--cell); border-color: var(--line); }
+.notes-badge { background: var(--brass); color: #14110d; border-radius: 99px; padding: 0 7px; font-size: .78rem; font-weight: 600; margin-left: 6px; }
+.notes-thread-pane { min-height: 360px; display: flex; flex-direction: column; }
+.notes-scroll { flex: 1; display: flex; flex-direction: column; gap: 10px; margin: 10px 0; max-height: 50vh; overflow-y: auto; }
+.note-bubble { align-self: flex-start; max-width: 80%; background: var(--cell); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
+.note-bubble.mine { align-self: flex-end; background: color-mix(in srgb, var(--brass) 18%, var(--cell)); }
+.note-from { font-size: .78rem; margin-bottom: 3px; display: flex; align-items: center; gap: 8px; }
+.note-body { white-space: pre-wrap; word-break: break-word; }
+.note-manage { margin-left: auto; display: flex; gap: 8px; }
+.note-flag { font-style: italic; opacity: .8; }
+.note-flag-del { color: var(--wax); }
+.note-bubble.note-deleted { opacity: .55; border-style: dashed; }
+.note-bubble.note-deleted .note-body { text-decoration: line-through; }
+.linklike { background: none; border: none; padding: 0; font-size: .78rem; color: var(--brass); text-decoration: underline; cursor: pointer; }
+.linklike:hover { opacity: .8; }
+.notes-thread.hidden-thread { opacity: .6; font-style: italic; }
+.type-cursor { display: inline-block; margin-left: 1px; animation: type-blink 1s step-end infinite; }
+@keyframes type-blink { 50% { opacity: 0; } }
+
+/* ---- unread marker: a report you're cleared for but haven't opened yet ---- */
+.unread-dot { display: inline-block; width: 8px; height: 8px; border-radius: 99px; background: var(--brass); margin-right: 7px; vertical-align: middle; }
 
 /* ---- dossier tile view: case files, in the current theme's palette ---- */
 .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 22px 18px; margin-top: 4px; }

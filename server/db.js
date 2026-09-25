@@ -60,7 +60,7 @@ if (!db.prepare("SELECT 1 FROM pragma_table_info('reports') WHERE name='filed_at
   db.exec('ALTER TABLE reports ADD COLUMN filed_at TEXT; UPDATE reports SET filed_at = created_at;');
 }
 
-// ---- case-file features: sources, revisions, addenda, links, persons of interest ----
+// ---- case-file features: sources, revisions, addenda, persons of interest ----
 db.exec(`
 CREATE TABLE IF NOT EXISTS sources(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE);
 CREATE TABLE IF NOT EXISTS report_revisions(
@@ -70,9 +70,6 @@ CREATE TABLE IF NOT EXISTS report_revisions(
 CREATE TABLE IF NOT EXISTS addenda(
   id INTEGER PRIMARY KEY, report_id INTEGER NOT NULL REFERENCES reports(id), body TEXT NOT NULL, confidence TEXT,
   source_id INTEGER REFERENCES sources(id), author_id INTEGER NOT NULL REFERENCES users(id), created_at TEXT NOT NULL DEFAULT (${NOW}));
-CREATE TABLE IF NOT EXISTS report_links(
-  a INTEGER NOT NULL REFERENCES reports(id), b INTEGER NOT NULL REFERENCES reports(id),
-  linked_by INTEGER NOT NULL REFERENCES users(id), PRIMARY KEY(a, b), CHECK(a < b));
 CREATE TABLE IF NOT EXISTS poi_revisions(
   id INTEGER PRIMARY KEY, tag_id INTEGER NOT NULL REFERENCES tags(id), description TEXT NOT NULL, aliases TEXT NOT NULL,
   edited_by INTEGER NOT NULL REFERENCES users(id), edited_at TEXT NOT NULL DEFAULT (${NOW}));
@@ -125,8 +122,6 @@ db.exec(`
 CREATE INDEX IF NOT EXISTS idx_reports_deleted_created ON reports(deleted_at, created_at);
 CREATE INDEX IF NOT EXISTS idx_report_tags_tag ON report_tags(tag_id);
 CREATE INDEX IF NOT EXISTS idx_revisions_report ON report_revisions(report_id);
-CREATE INDEX IF NOT EXISTS idx_links_a ON report_links(a);
-CREATE INDEX IF NOT EXISTS idx_links_b ON report_links(b);
 CREATE INDEX IF NOT EXISTS idx_attachments_report ON attachments(report_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_tags_category ON tags(category_id);
@@ -187,6 +182,123 @@ CREATE INDEX IF NOT EXISTS idx_faction_members_faction ON faction_members(factio
 // The field-messages feature (a Warden leaving a note at a Hold for a specific informant) was
 // removed. A database that already created the table keeps it, harmlessly unused — dropping it
 // isn't worth the risk to a table that isn't referenced anywhere any more.
+
+// Report linking (marking two reports as related to each other) was removed the same way — an
+// existing database keeps the now-unused report_links table rather than risk a DROP.
+
+// ---- faction clearance: a faction's roster is gated exactly like a report's body (server/index.js) ----
+if (!db.prepare("SELECT 1 FROM pragma_table_info('factions') WHERE name = 'clearance'").get()) {
+  db.exec('ALTER TABLE factions ADD COLUMN clearance INTEGER NOT NULL DEFAULT 0');
+}
+
+// ---- persons of interest: same treatment as a report — filed at the highest (Warden-only)
+// clearance by default, a Warden can lower it afterward. MAX_CLEARANCE is 5 in server/index.js;
+// duplicated here as a literal the same way that file already duplicates it from views.jsx.
+if (!db.prepare("SELECT 1 FROM pragma_table_info('poi_profiles') WHERE name = 'clearance'").get()) {
+  db.exec('ALTER TABLE poi_profiles ADD COLUMN clearance INTEGER NOT NULL DEFAULT 5');
+}
+
+// ---- hard delete: a deliberate, narrow escape hatch from the append-only guarantees above ----
+// Used only once an item is already redacted, and only by a Warden (server/index.js enforces both).
+// It transiently drops the named BEFORE DELETE guard triggers, runs the deletes, and puts the exact
+// same triggers straight back before the transaction commits — so the guarantee still holds for
+// every other codepath, including a crash mid-purge (SQLite rolls the whole transaction back).
+const DELETE_GUARDS = {
+  reports_no_delete: "CREATE TRIGGER reports_no_delete BEFORE DELETE ON reports BEGIN SELECT RAISE(ABORT, 'reports are never deleted'); END",
+  rev_no_del: "CREATE TRIGGER rev_no_del BEFORE DELETE ON report_revisions BEGIN SELECT RAISE(ABORT, 'history is permanent'); END",
+  add_no_del: "CREATE TRIGGER add_no_del BEFORE DELETE ON addenda BEGIN SELECT RAISE(ABORT, 'addenda are permanent'); END",
+  attach_no_del: "CREATE TRIGGER attach_no_del BEFORE DELETE ON attachments BEGIN SELECT RAISE(ABORT, 'attachments are permanent'); END",
+  poirev_no_del: "CREATE TRIGGER poirev_no_del BEFORE DELETE ON poi_revisions BEGIN SELECT RAISE(ABORT, 'history is permanent'); END",
+};
+export const hardDelete = (guards, fn) => db.transaction(() => {
+  for (const g of guards) db.exec(`DROP TRIGGER IF EXISTS ${g}`);
+  try { return fn(); } finally { for (const g of guards) db.exec(DELETE_GUARDS[g]); }
+})();
+
+// A purge route used to hand-list every table that could hold a row pointing at the thing being
+// removed, and it's easy to add a new referencing table later (or forget one that's already
+// there) without updating that list — exactly what caused a "FOREIGN KEY constraint failed" on
+// deleting a report that still had rows elsewhere quietly pointing at it. This asks SQLite's own
+// schema what actually references `table`, via pragma_foreign_key_list, and deletes every row
+// that does — so a purge can never again be missing a table it should have cleaned up first.
+export const cascadeDelete = (table, id) => {
+  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name != ?").all(table).map((r) => r.name);
+  for (const t of tables) {
+    const fks = db.prepare('SELECT "table" AS ref_table, "from" AS ref_col FROM pragma_foreign_key_list(?)').all(t);
+    for (const fk of fks) {
+      if (fk.ref_table === table) db.prepare(`DELETE FROM "${t}" WHERE "${fk.ref_col}" = ?`).run(id);
+    }
+  }
+};
+
+// ---- anonymous Warden <-> member notes: a private thread per agent. A Warden's message is shown
+// to the member as coming from "The Wardens" collectively, never a specific person — author_id is
+// kept for the record but the API (server/index.js) never returns it for a Warden-sent message.
+// member_id/author_id are nullable: removing a user (DELETE /api/users/:id) never has to touch
+// this table, it just clears the pointer and leaves member_label as a snapshot of who it was, so
+// the thread and every message in it survive a fully-removed account intact. hidden lets a Warden
+// pull the whole thread out of a member's Archive without deleting anything; deleted_at/edited_at
+// on a message let a Warden delete or rewrite a single line with nothing shown to the member —
+// GET /api/notes/mine (server/index.js) is what actually keeps both invisible to them. ----
+db.exec(`
+CREATE TABLE IF NOT EXISTS notes_threads(
+  id INTEGER PRIMARY KEY,
+  member_id INTEGER UNIQUE REFERENCES users(id),
+  member_label TEXT,
+  hidden INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (${NOW}));
+CREATE TABLE IF NOT EXISTS notes_messages(
+  id INTEGER PRIMARY KEY,
+  thread_id INTEGER NOT NULL REFERENCES notes_threads(id),
+  sender TEXT NOT NULL CHECK(sender IN ('warden', 'member')),
+  author_id INTEGER REFERENCES users(id),
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (${NOW}),
+  edited_at TEXT,
+  deleted_at TEXT,
+  read_at TEXT);
+CREATE INDEX IF NOT EXISTS idx_notes_messages_thread ON notes_messages(thread_id, id);
+`);
+// Migrate a database from before member_id/author_id were relaxed to nullable — SQLite can't drop
+// a NOT NULL constraint in place, so this rebuilds the table (same technique as any SQLite column
+// migration) and copies every row across, only once, the first time this runs against an old copy.
+if (db.prepare('SELECT "notnull" FROM pragma_table_info(\'notes_threads\') WHERE name = \'member_id\'').get()?.notnull) {
+  // Dropping notes_threads while notes_messages still references it fails FK checks unless
+  // enforcement is off for the duration; PRAGMA foreign_keys can't be toggled inside a transaction,
+  // so it's flipped off before and back on after, not inside the db.transaction() call below.
+  db.pragma('foreign_keys = OFF');
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE notes_threads_new(
+        id INTEGER PRIMARY KEY, member_id INTEGER UNIQUE REFERENCES users(id), member_label TEXT,
+        hidden INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (${NOW}));
+      INSERT INTO notes_threads_new(id, member_id, created_at) SELECT id, member_id, created_at FROM notes_threads;
+      DROP TABLE notes_threads;
+      ALTER TABLE notes_threads_new RENAME TO notes_threads;
+      CREATE TABLE notes_messages_new(
+        id INTEGER PRIMARY KEY, thread_id INTEGER NOT NULL REFERENCES notes_threads(id),
+        sender TEXT NOT NULL CHECK(sender IN ('warden', 'member')), author_id INTEGER REFERENCES users(id),
+        body TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (${NOW}), edited_at TEXT, deleted_at TEXT, read_at TEXT);
+      INSERT INTO notes_messages_new(id, thread_id, sender, author_id, body, created_at, read_at)
+        SELECT id, thread_id, sender, author_id, body, created_at, read_at FROM notes_messages;
+      DROP TABLE notes_messages;
+      ALTER TABLE notes_messages_new RENAME TO notes_messages;
+      CREATE INDEX IF NOT EXISTS idx_notes_messages_thread ON notes_messages(thread_id, id);
+    `);
+  })();
+  db.pragma('foreign_keys = ON');
+}
+
+// ---- report read-state: per viewer, so a reader can be shown which cleared reports they haven't
+// opened yet. Purely a convenience marker, not part of any permanent record — deleting the report
+// or the user is fine to cascade here (see cascadeDelete callers) since nothing else depends on it. ----
+db.exec(`
+CREATE TABLE IF NOT EXISTS report_reads(
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  report_id INTEGER NOT NULL REFERENCES reports(id),
+  read_at TEXT NOT NULL DEFAULT (${NOW}),
+  PRIMARY KEY(user_id, report_id));
+`);
 
 // A curated pool of in-universe cover names. Assigned once, at signup, to every account that isn't
 // the first (the founding Warden never needs one) — see server/index.js. Kept here so it sits next
