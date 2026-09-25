@@ -234,6 +234,9 @@ fieldset.bare { border: 0; padding: 0; margin: 0; min-width: 0; }
 .note-bubble.note-deleted .note-body { text-decoration: line-through; }
 .linklike { background: none; border: none; padding: 0; font-size: .78rem; color: var(--brass); text-decoration: underline; cursor: pointer; }
 .linklike:hover { opacity: .8; }
+.pick-or-type { display: flex; gap: 8px; align-items: center; flex: 1; min-width: 0; }
+.pick-or-type input { flex: 1; margin: 0; min-width: 0; }
+.pick-or-type .linklike { white-space: nowrap; }
 .notes-thread.hidden-thread { opacity: .6; font-style: italic; }
 .type-cursor { display: inline-block; margin-left: 1px; animation: type-blink 1s step-end infinite; }
 @keyframes type-blink { 50% { opacity: 0; } }

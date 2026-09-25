@@ -153,11 +153,31 @@ const ConfSelect = ({ value, onChange }) => (
   <Sel ariaLabel="Confidence" options={[{ value: '', label: 'Confidence: unrated' }, ...Object.entries(CONF).map(([k, l]) => ({ value: k, label: l }))]}
     value={value || ''} onChange={onChange} />
 );
-function SourceField({ value, onChange }) { // pick an existing source or type a new one; new ones join the list permanently
+// A GlideSelect dropdown for picking an existing value, with a "+ Add new…" option that swaps in a
+// plain text field for typing one that isn't on the list yet (a source, a tag category) — the same
+// pick-or-type freedom the old <input list> datalist gave, just via the app's own dropdown widget.
+const NEW_OPT = '__new__';
+function PickOrType({ options, value, onChange, ariaLabel, placeholder, addLabel = '+ Add new…' }) {
+  const [typing, setTyping] = useState(false);
+  const known = options.includes(value);
+  const showInput = typing || (!!value && !known);
+  if (showInput) {
+    return (
+      <span className="pick-or-type">
+        <input placeholder={placeholder} value={value} onChange={(e) => onChange(e.target.value)} autoFocus={typing} />
+        {options.length > 0 && <button type="button" className="linklike" onClick={() => { setTyping(false); onChange(''); }}>choose existing</button>}
+      </span>
+    );
+  }
+  return (
+    <Sel ariaLabel={ariaLabel} placeholder={placeholder} options={[...options.map((o) => ({ value: o, label: o })), { value: NEW_OPT, label: addLabel }]}
+      value={value || ''} onChange={(v) => (v === NEW_OPT ? (setTyping(true), onChange('')) : onChange(v))} />
+  );
+}
+function SourceField({ value, onChange }) { // pick an existing source, or add a new one — new ones join the list permanently
   const [list, setList] = useState([]);
   useEffect(() => { api.get('/sources').then(setList).catch(() => {}); }, []);
-  return (<><input list="sources" placeholder="Source (choose one, or type a new one)" value={value} onChange={(e) => onChange(e.target.value)} />
-    <datalist id="sources">{list.map((x) => <option key={x} value={x} />)}</datalist></>);
+  return <PickOrType options={list} value={value || ''} onChange={onChange} ariaLabel="Source" placeholder="Source" addLabel="+ New source…" />;
 }
 
 function Overlay({ id, close, children }) { // frosted backdrop; the card grows into the sheet (shared layoutId)
@@ -501,6 +521,9 @@ function TagPicker({ tags, on, lock = [], toggle, create, close, canDelete, onDe
   const [q, setQ] = useState(''), [nc, setNc] = useState(''), [nt, setNt] = useState('');
   const g = {};
   tags.filter((t) => t.name.toLowerCase().includes(q.toLowerCase())).forEach((t) => (g[t.category] ||= []).push(t));
+  // Every category that exists, unaffected by the filter above — a search for a tag name shouldn't
+  // narrow which categories show up in the "new tag" picker below.
+  const allCats = [...new Set(tags.map((t) => t.category))];
   const del = (id) => api.del('/tags/' + id).then(() => onDeleted(id)).catch(() => {});
   return (
     <div className="modal" onClick={close}>
@@ -508,6 +531,13 @@ function TagPicker({ tags, on, lock = [], toggle, create, close, canDelete, onDe
         <div className="row"><h2 style={{ flex: 1 }}>Tags</h2><button className="primary" onClick={close}>Done</button></div>
         <input placeholder="Filter tags..." value={q} onChange={(e) => setQ(e.target.value)} />
         {canDelete && <p className="dim">Hold the × to remove a tag from every report. Posting the same name again re-tags anything that still mentions it.</p>}
+        {create && (
+          // Kept near the top, above the (often long, scrollable) tag list below: the category
+          // dropdown's own menu is positioned relative to this modal and gets clipped by its
+          // overflow-y scroll region if opened too close to the bottom edge.
+          <div className="row"><PickOrType options={allCats} value={nc} onChange={setNc} ariaLabel="Category" placeholder="Category" addLabel="+ New category…" />
+            <input placeholder="New tag" value={nt} onChange={(e) => setNt(e.target.value)} />
+            <button onClick={() => create(nc, nt).then(() => setNt(''))}>Create tag</button></div>)}
         {Object.entries(g).map(([c, ts]) => (
           <div key={c}><h3>{c}</h3>{ts.map((t) => (
             <span key={t.id} className="tag-row">
@@ -516,11 +546,6 @@ function TagPicker({ tags, on, lock = [], toggle, create, close, canDelete, onDe
                 <HoldButton size="sm" radius={99} holdTime={1000} doneLabel="Gone" backgroundColor="transparent" textColor="var(--dim)"
                   fillColor="#a33a34" glow={false} resetAfter={400} className="tag-del" onHold={() => del(t.id)}>×</HoldButton>)}
             </span>))}</div>))}
-        {create && (
-          <div className="row"><input list="tcats" placeholder="Category" value={nc} onChange={(e) => setNc(e.target.value)} />
-            <datalist id="tcats">{Object.keys(g).map((c) => <option key={c} value={c} />)}</datalist>
-            <input placeholder="New tag" value={nt} onChange={(e) => setNt(e.target.value)} />
-            <button onClick={() => create(nc, nt).then(() => setNt(''))}>Create tag</button></div>)}
       </div>
     </div>
   );
