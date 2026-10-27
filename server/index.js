@@ -17,6 +17,13 @@ const clearanceOk = (viewer, level) => viewer.role === 'warden' || (viewer.clear
 // The same 400 (`Clearance must be 0-N`) is hand-checked on four separate PATCH .../clearance routes
 // below; this is that one validation, returning the clamped integer or null for "reject with 400".
 const parseClearance = (v) => { const c = parseInt(v, 10); return Number.isInteger(c) && c >= 0 && c <= MAX_CLEARANCE ? c : null; };
+// The sitewide default a new report/POI files at when nobody picks a level explicitly — a Warden
+// can tune this (PATCH /api/settings/default-clearance, below); MAX_CLEARANCE until they do.
+const getDefaultClearance = () => {
+  const v = db.prepare("SELECT value FROM app_settings WHERE key = 'default_clearance'").get()?.value;
+  const c = parseInt(v, 10);
+  return Number.isInteger(c) && c >= 0 && c <= MAX_CLEARANCE ? c : MAX_CLEARANCE;
+};
 // A handful of routes just need "does this id exist in this table" as a 404 gate or inline check —
 // table is always a fixed string at the call site below, never user input.
 const existsIn = (table, id) => !!db.prepare(`SELECT 1 FROM "${table}" WHERE id = ?`).get(id);
@@ -189,9 +196,33 @@ app.post('/api/me/password', need(), (req, res) => {
 /* ---------- personnel (Warden) ---------- */
 // `hidden=1` includes accounts a Warden has pulled out of the default list (see PATCH .../hidden
 // below) — same opt-in pattern as `deleted=1` on reports/pois: hidden by default, visible on request.
+// `online` is just "does this account have any session row that hasn't expired yet" — the same
+// check session-auth already does per-request, just surfaced here for a Warden to see at a glance.
+// It can't tell you if the tab is actually open right now, only that they haven't logged out and
+// their 30-day session hasn't expired — still the closest thing to "active" this app tracks.
 app.get('/api/users', need('warden'), (req, res) => res.json(db.prepare(
-  `SELECT id, callsign, role, clearance, notes, hidden, created_at FROM users
-   WHERE removed_at IS NULL ${req.query.hidden === '1' ? '' : 'AND hidden = 0'} ORDER BY id`).all()));
+  `SELECT u.id, u.callsign, u.role, u.clearance, u.notes, u.hidden, u.created_at,
+     EXISTS(SELECT 1 FROM sessions s WHERE s.user_id = u.id AND s.expires_at > ?) AS online
+   FROM users u WHERE u.removed_at IS NULL ${req.query.hidden === '1' ? '' : 'AND u.hidden = 0'} ORDER BY u.id`).all(Date.now())));
+// A quick personnel-wide roundup for the Personnel tab's stats view: per-user report/addendum
+// counts (own authorship only, redacted reports excluded) plus a few sitewide totals. Warden-only,
+// same as the rest of Personnel — this is a headcount of casework, not a case file itself.
+app.get('/api/stats/personnel', need('warden'), (_req, res) => {
+  const perUser = db.prepare(`
+    SELECT u.id, u.callsign, u.role,
+      (SELECT COUNT(*) FROM reports r WHERE r.author_id = u.id AND r.deleted_at IS NULL) AS reports,
+      (SELECT COUNT(*) FROM addenda a WHERE a.author_id = u.id) AS addenda
+    FROM users u WHERE u.removed_at IS NULL ORDER BY reports DESC, u.callsign`).all();
+  const totals = db.prepare(`SELECT
+      (SELECT COUNT(*) FROM reports WHERE deleted_at IS NULL) AS reports,
+      (SELECT COUNT(*) FROM reports WHERE deleted_at IS NOT NULL) AS redacted,
+      (SELECT COUNT(*) FROM users WHERE removed_at IS NULL AND role = 'agent') AS agents,
+      (SELECT COUNT(*) FROM users WHERE removed_at IS NULL AND role = 'warden') AS wardens,
+      (SELECT COUNT(*) FROM users WHERE removed_at IS NULL AND role = 'pending') AS pending,
+      (SELECT COUNT(*) FROM tags t JOIN categories c ON c.id = t.category_id WHERE c.name = 'Person') AS pois,
+      (SELECT COUNT(*) FROM factions) AS factions`).get();
+  res.json({ totals, perUser });
+});
 app.patch('/api/users/:id', need('warden'), (req, res) => {
   const id = +req.params.id, role = req.body?.role;
   if (!['warden', 'agent', 'pending'].includes(role)) return res.status(400).json({ error: 'Bad role' });
@@ -394,6 +425,11 @@ const hydrate = (rows, viewer) => {
   // part of the permanent record — powers the unread dot on a report they're cleared for but haven't
   // opened yet. Only meaningful once a report is actually readable, so it's left off a scrambled one.
   const readIds = viewer ? new Set(all(`SELECT report_id FROM report_reads WHERE user_id = ? AND report_id IN (${m})`, viewer.id, ...ids).map((x) => x.report_id)) : null;
+  // Corroborating sources (report_sources, db.js) — a freely addable/removable list, distinct from
+  // the single source_id a report/revision/addendum's own text carries (that one is "the source for
+  // this version of the wording"; this is "everything else that backs it up"), same low-ceremony
+  // add/remove-without-a-revision pattern a tag already has.
+  const sr = all(`SELECT rs.report_id, s.id, s.name FROM report_sources rs JOIN sources s ON s.id = rs.source_id WHERE rs.report_id IN (${m}) ORDER BY s.name COLLATE NOCASE`, ...ids);
   return rows.map((r) => {
     const full = !viewer || clearanceOk(viewer, r.clearance) || r.author_id === viewer.id || grantedIds.has(r.id);
     const v = rv.filter((x) => x.report_id === r.id), c = v.at(-1);
@@ -414,6 +450,7 @@ const hydrate = (rows, viewer) => {
       ...(c ? { title: c.title, body: c.body, confidence: c.confidence, source: c.source } : {}),
       tags, unread: !!viewer && !readIds.has(r.id),
       revisions: [...v].reverse(), attachments: at.filter((x) => x.report_id === r.id),
+      sources: sr.filter((x) => x.report_id === r.id).map(({ report_id, ...x }) => x),
       addenda: ad.filter((x) => x.report_id === r.id).map((n) => {
         const nv = arv.filter((x) => x.addendum_id === n.id), nc = nv.at(-1);
         return {
@@ -441,13 +478,14 @@ app.post('/api/reports', need(), (req, res) => {
   const occ = req.body?.occurredAt ? new Date(req.body.occurredAt) : new Date(); // when it happened (retroactive filing allowed)
   if (isNaN(occ) || occ > Date.now() + 3e5) return res.status(400).json({ error: 'Invalid or future event time' });
   const manual = Array.isArray(req.body?.tagIds) ? req.body.tagIds.filter(Number.isInteger) : [];
-  // A filing always starts at the highest (Warden-only) clearance by default — same rule a POI file
-  // already followed (see savePoi below) — whoever posts it, warden included: nothing is broadly
-  // readable just because of who happened to write it. A Warden can still choose a lower clearance
-  // explicitly at filing time, or loosen it afterward via PATCH .../clearance; an agent cannot.
+  // A filing always starts at the sitewide default clearance (Warden-only until a Warden changes
+  // it — see getDefaultClearance above) — same rule a POI file already followed (see savePoi below)
+  // — whoever posts it, warden included: nothing is broadly readable just because of who happened to
+  // write it. A Warden can still choose a different clearance explicitly at filing time, or loosen
+  // it afterward via PATCH .../clearance; an agent cannot.
   const reqClearance = parseInt(req.body?.clearance, 10);
   const clearance = req.user.role === 'warden' && Number.isInteger(reqClearance)
-    ? Math.max(0, Math.min(MAX_CLEARANCE, reqClearance)) : MAX_CLEARANCE;
+    ? Math.max(0, Math.min(MAX_CLEARANCE, reqClearance)) : getDefaultClearance();
   const id = db.transaction(() => {
     const rid = db.prepare('INSERT INTO reports(title, body, author_id, created_at, confidence, source_id, clearance) VALUES(?,?,?,?,?,?,?)')
       .run(title, body, req.user.id, occ.toISOString(), conf(req.body.confidence), srcId(req.body.source), clearance).lastInsertRowid;
@@ -493,6 +531,10 @@ app.post('/api/reports/:id/addenda', need(), exists, (req, res) => {
     db.prepare('INSERT INTO addenda(report_id, body, confidence, source_id, author_id) VALUES(?,?,?,?,?)')
       .run(id, body, conf(req.body.confidence), srcId(req.body.source), req.user.id);
     tagText(id, body); // names mentioned in the addendum tag the report too
+    // A new addendum is an update worth re-flagging — mark the report unread for everyone who'd
+    // already read it, except whoever just wrote this (they're looking at it right now). Deliberately
+    // NOT done on a report edit or an addendum edit (both below) — those work as they already did.
+    db.prepare('DELETE FROM report_reads WHERE report_id = ? AND user_id != ?').run(id, req.user.id);
   })();
   res.status(201).json(one(id, req.user));
 });
@@ -571,6 +613,26 @@ app.post('/api/attachments/:id/remove', need(), (req, res) => { // soft-remove: 
   res.json(one(a.report_id, req.user));
 });
 
+/* Corroborating sources — a report can cite as many as apply, added or removed on the fly like a
+   tag (no revision created). This is separate from the single source_id a report/revision/addendum's
+   own text carries via srcId() above; that one travels with the wording, this is the standing list. */
+app.post('/api/reports/:id/sources', need(), exists, (req, res) => {
+  const id = +req.params.id, r = db.prepare('SELECT deleted_at FROM reports WHERE id = ?').get(id);
+  if (r.deleted_at) return res.status(400).json({ error: 'That report is redacted' });
+  if (!cleared(id, req.user)) return res.status(403).json({ error: 'You are not cleared to read this report' });
+  const sourceId = srcId(req.body?.name);
+  if (!sourceId) return res.status(400).json({ error: 'A source needs a name' });
+  db.prepare('INSERT OR IGNORE INTO report_sources(report_id, source_id, added_by) VALUES(?,?,?)').run(id, sourceId, req.user.id);
+  res.status(201).json(one(id, req.user));
+});
+app.delete('/api/reports/:id/sources/:sourceId', need(), exists, (req, res) => {
+  const id = +req.params.id, r = db.prepare('SELECT deleted_at FROM reports WHERE id = ?').get(id);
+  if (r.deleted_at) return res.status(400).json({ error: 'That report is redacted' });
+  if (!cleared(id, req.user)) return res.status(403).json({ error: 'You are not cleared to read this report' });
+  db.prepare('DELETE FROM report_sources WHERE report_id = ? AND source_id = ?').run(id, +req.params.sourceId);
+  res.json(one(id, req.user));
+});
+
 /* Persons of interest are tags in the "Person" category with a profile, so name and alias mentions link reports automatically.
    Redacting a file hides the person and their tag from ordinary use without ever touching poi_revisions' permanent history. */
 // A file's clearance works exactly like a report's (server-wide default MAX_CLEARANCE, above):
@@ -601,11 +663,11 @@ const savePoi = (tagId, b, uid) => {
 app.post('/api/pois', need(), (req, res) => {
   const n = String(req.body?.name || '').trim().slice(0, 60);
   if (!n) return res.status(400).json({ error: 'A name is required' });
-  // A file always starts at the highest (Warden-only) clearance, same as an agent's report filing —
-  // a Warden may choose a lower one right away, or loosen it later via the clearance route below.
+  // A file always starts at the sitewide default clearance, same as an agent's report filing —
+  // a Warden may choose a different one right away, or loosen it later via the clearance route below.
   const reqClearance = parseInt(req.body?.clearance, 10);
   const clearance = req.user.role === 'warden' && Number.isInteger(reqClearance)
-    ? Math.max(0, Math.min(MAX_CLEARANCE, reqClearance)) : MAX_CLEARANCE;
+    ? Math.max(0, Math.min(MAX_CLEARANCE, reqClearance)) : getDefaultClearance();
   const id = db.transaction(() => {
     db.prepare("INSERT OR IGNORE INTO categories(name) VALUES('Person')").run();
     const cid = db.prepare("SELECT id FROM categories WHERE name = 'Person'").get().id;
@@ -657,20 +719,27 @@ app.patch('/api/pois/:id/clearance', need('warden'), (req, res) => {
 
 // Allowlisted so `sort` can only ever become one of these exact ORDER BY clauses — never string
 // concatenated straight from the query param.
+// "Latest activity" for sort purposes only (never shown — r.created_at, the actual event time, is
+// what's still returned and displayed): a fresh addendum resurfaces a report in newest-first order,
+// an edit (report_revisions) deliberately does not — that's "edits work as intended", unchanged.
+const ACTIVITY = `COALESCE((SELECT MAX(created_at) FROM addenda WHERE report_id = r.id), r.created_at)`;
 const SORTS = {
-  'time-desc': 'r.created_at DESC', 'time-asc': 'r.created_at ASC',
+  'time-desc': `${ACTIVITY} DESC`, 'time-asc': `${ACTIVITY} ASC`,
   'poster': 'u.callsign COLLATE NOCASE ASC, r.created_at DESC',
   'clearance-desc': 'r.clearance DESC, r.created_at DESC', 'clearance-asc': 'r.clearance ASC, r.created_at DESC',
 };
 app.get('/api/reports', need(), (req, res) => {
   const { q, tags, deleted, limit, offset, sort } = req.query, w = [], a = [];
-  if (!(deleted === '1' && req.user.role === 'warden')) w.push('r.deleted_at IS NULL');
-  const words = String(q || '').match(/[\p{L}\p{N}]+/gu);
-  if (words) { // searches originals, every revision, and every addendum
+  // `deleted=1` (Warden only) is a dedicated view of ONLY the redacted reports, not those plus
+  // everything else — same opt-in-to-a-different-list pattern `hidden=1` uses on GET /api/users.
+  w.push(req.user.role === 'warden' && deleted === '1' ? 'r.deleted_at IS NOT NULL' : 'r.deleted_at IS NULL');
+  const rawQ = String(q || '').trim();
+  const words = rawQ.match(/[\p{L}\p{N}]+/gu);
+  if (words) { // searches originals, every revision, every addendum, and the filing author's callsign
     const f = words.map((t) => `"${t}"*`).join(' ');
     w.push(`(r.id IN (SELECT rowid FROM reports_fts WHERE reports_fts MATCH ?) OR r.id IN (SELECT report_id FROM report_revisions WHERE id IN (SELECT rowid FROM rev_fts WHERE rev_fts MATCH ?))
-      OR r.id IN (SELECT report_id FROM addenda WHERE id IN (SELECT rowid FROM add_fts WHERE add_fts MATCH ?)))`);
-    a.push(f, f, f);
+      OR r.id IN (SELECT report_id FROM addenda WHERE id IN (SELECT rowid FROM add_fts WHERE add_fts MATCH ?)) OR u.callsign LIKE ?)`);
+    a.push(f, f, f, `%${rawQ}%`);
   }
   for (const t of String(tags || '').split(',').filter(Boolean)) { w.push('r.id IN (SELECT report_id FROM report_tags WHERE tag_id = ?)'); a.push(+t); }
   const order = SORTS[sort] || SORTS['time-desc'];
@@ -679,8 +748,11 @@ app.get('/api/reports', need(), (req, res) => {
   // ones aren't buried under a page of sealed ones. Still present, still counted — just lower.
   const visible = `(CASE WHEN ? = 'warden' THEN 1 WHEN r.clearance <= ? THEN 1 WHEN r.author_id = ? THEN 1
     WHEN EXISTS (SELECT 1 FROM access_grants g WHERE g.report_id = r.id AND g.user_id = ?) THEN 1 ELSE 0 END)`;
-  const rows = db.prepare(`${SELECT} ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY ${visible} DESC, ${order} LIMIT ? OFFSET ?`)
-    .all(...a, req.user.role, req.user.clearance || 0, req.user.id, req.user.id, Math.min(+limit || 50, 200), +offset || 0);
+  // Same idea, one layer further in: among reports the viewer CAN read, an unread one sorts above a
+  // read one — still within whatever sort order was picked, just grouped first.
+  const unread = `(CASE WHEN EXISTS (SELECT 1 FROM report_reads rr WHERE rr.report_id = r.id AND rr.user_id = ?) THEN 0 ELSE 1 END)`;
+  const rows = db.prepare(`${SELECT} ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY ${visible} DESC, ${unread} DESC, ${order} LIMIT ? OFFSET ?`)
+    .all(...a, req.user.role, req.user.clearance || 0, req.user.id, req.user.id, req.user.id, Math.min(+limit || 50, 200), +offset || 0);
   res.json(hydrate(rows, req.user));
 });
 
@@ -946,6 +1018,48 @@ app.get('/api/notes/status', need(), (req, res) => {
   if (!t) return res.json({ open: false, unread: 0 });
   const unread = db.prepare("SELECT COUNT(*) AS n FROM notes_messages WHERE thread_id = ? AND sender = 'warden' AND read_at IS NULL AND deleted_at IS NULL").get(t.id).n;
   res.json({ open: true, unread });
+});
+
+/* ---------- sitewide settings (Warden) ---------- */
+// Readable by anyone signed in (an agent's Compose form shows the level their filing will land at,
+// even though they can't change it), writable only by a Warden.
+app.get('/api/settings/default-clearance', need(), (_req, res) => res.json({ clearance: getDefaultClearance() }));
+app.patch('/api/settings/default-clearance', need('warden'), (req, res) => {
+  const clearance = parseClearance(req.body?.clearance);
+  if (clearance === null) return res.status(400).json({ error: `Clearance must be 0-${MAX_CLEARANCE}` });
+  db.prepare("INSERT INTO app_settings(key, value) VALUES('default_clearance', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(String(clearance));
+  res.json({ clearance });
+});
+
+/* ---------- bug reports & suggestions ---------- */
+// Deliberately plain — app feedback, not a case file: no clearance gating, no revision history, just
+// a short note and a status a Warden can flip. author_label is a frozen snapshot of the callsign at
+// submit time, so a later-removed or renamed account doesn't change what a past report says.
+app.post('/api/feedback', need(), (req, res) => {
+  const kind = req.body?.kind === 'bug' ? 'bug' : req.body?.kind === 'suggestion' ? 'suggestion' : null;
+  const body = String(req.body?.body || '').trim().slice(0, 4000);
+  if (!kind) return res.status(400).json({ error: "Kind must be 'bug' or 'suggestion'" });
+  if (!body) return res.status(400).json({ error: 'Say what the bug or suggestion is' });
+  const info = db.prepare('INSERT INTO feedback(kind, body, author_id, author_label) VALUES(?,?,?,?)').run(kind, body, req.user.id, req.user.callsign);
+  res.status(201).json(db.prepare('SELECT * FROM feedback WHERE id = ?').get(info.lastInsertRowid));
+});
+// A Warden sees every submission; everyone else sees only their own, so submitting isn't the same
+// as being able to browse what other people reported.
+app.get('/api/feedback', need(), (req, res) => {
+  const rows = req.user.role === 'warden'
+    ? db.prepare('SELECT * FROM feedback ORDER BY (status = \'open\') DESC, id DESC').all()
+    : db.prepare('SELECT * FROM feedback WHERE author_id = ? ORDER BY id DESC').all(req.user.id);
+  res.json(rows);
+});
+app.patch('/api/feedback/:id/status', need('warden'), (req, res) => {
+  const status = req.body?.status === 'closed' ? 'closed' : req.body?.status === 'open' ? 'open' : null;
+  if (!status) return res.status(400).json({ error: "Status must be 'open' or 'closed'" });
+  const now = new Date().toISOString();
+  db.prepare('UPDATE feedback SET status = ?, resolved_at = CASE WHEN ? = \'closed\' THEN ? ELSE NULL END, resolved_by = CASE WHEN ? = \'closed\' THEN ? ELSE NULL END WHERE id = ?')
+    .run(status, status, now, status, req.user.id, +req.params.id);
+  const row = db.prepare('SELECT * FROM feedback WHERE id = ?').get(+req.params.id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  res.json(row);
 });
 
 /* ---------- per-user settings (theme + font) ---------- */

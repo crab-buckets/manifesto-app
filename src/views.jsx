@@ -389,6 +389,36 @@ function Dossier({ id, prefix, tag, title, meta, excerpt: ex, redacted, onOpen, 
   );
 }
 
+// Corroborating sources — as many as apply, added or removed without creating a revision (same
+// low-ceremony pattern as a tag). Distinct from the single source field in the body/addendum forms
+// above, which travels with one version of the wording; this is the report's standing citation list.
+function SourcesPanel({ r, onChange }) {
+  const [name, setName] = useState(''), [err, setErr] = useState('');
+  const add = () => {
+    if (!name.trim()) return;
+    api.post(`/reports/${r.id}/sources`, { name }).then(() => { setName(''); setErr(''); onChange(); }).catch((e) => setErr(e.message));
+  };
+  const remove = (id) => api.del(`/reports/${r.id}/sources/${id}`).then(onChange);
+  return (
+    <div className="attach-block">
+      <h3>Sources</h3>
+      <div>{(r.sources || []).map((s) => (
+        <span key={s.id} className="tag-row">
+          <Chip tag={{ name: s.name, category: 'Source' }} on />
+          <HoldButton size="sm" radius={99} holdTime={600} doneLabel="Off" backgroundColor="transparent" textColor="var(--dim)"
+            fillColor="#a33a34" glow={false} resetAfter={400} className="tag-del" aria-label={`Remove ${s.name} as a source`} title={`Remove ${s.name} as a source`}
+            onHold={() => remove(s.id)}>×</HoldButton>
+        </span>))}
+        {!(r.sources || []).length && <span className="dim">No sources listed yet.</span>}</div>
+      <div className="row">
+        <input placeholder="Add a source..." value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && add()} />
+        <button onClick={add} disabled={!name.trim()}>Add</button>
+      </div>
+      {err && <p className="bad">{err}</p>}
+    </div>
+  );
+}
+
 function GrantsPanel({ r, onChange }) {
   const [users, setUsers] = useState([]), [granted, setGranted] = useState([]), [pick, setPick] = useState('');
   const load = () => api.get(`/reports/${r.id}/grants`).then(setGranted);
@@ -510,6 +540,7 @@ export function Report({ r, me, onChange, reveal, variant = 'list', shredder }) 
               {r.addenda.map((a) => <AddendumCard key={a.id} a={a} onChange={onChange} />)}
             </div>)}
           <Attachments report={r} me={me} onChange={onChange} locked={!!r.deleted_at} />
+          {!r.deleted_at && <SourcesPanel r={r} onChange={onChange} />}
           {me.role === 'warden' && !r.deleted_at && <GrantsPanel r={r} onChange={onChange} />}
           {r.deleted_at ? (me.role === 'warden' && (
             <div className="row">
@@ -608,6 +639,11 @@ const hit = (t, txt) => [t.name, ...(t.aliases || '').split(',').map((a) => a.tr
 
 function TagPicker({ tags, on, lock = [], toggle, create, close, canDelete, onDeleted }) {
   const [q, setQ] = useState(''), [nc, setNc] = useState(''), [nt, setNt] = useState(''), [cErr, setCErr] = useState('');
+  // Which categories are collapsed, keyed by name — clicking a category's own heading toggles it.
+  // Collapsed is per-picker-instance state, not remembered across opens; a filter query always shows
+  // every matching category regardless of its collapsed state, so a search never hides a result.
+  const [closed, setClosed] = useState(() => new Set());
+  const toggleCat = (c) => setClosed((cur) => { const n = new Set(cur); n.has(c) ? n.delete(c) : n.add(c); return n; });
   const g = {};
   tags.filter((t) => t.name.toLowerCase().includes(q.toLowerCase())).forEach((t) => (g[t.category] ||= []).push(t));
   // Every category that exists, unaffected by the filter above — a search for a tag name shouldn't
@@ -636,15 +672,25 @@ function TagPicker({ tags, on, lock = [], toggle, create, close, canDelete, onDe
             <input placeholder="New tag" value={nt} onChange={(e) => setNt(e.target.value)} />
             <button onClick={doCreate}>Create tag</button></div>)}
         {create && cErr && <p className="bad">{cErr}</p>}
-        {Object.entries(g).map(([c, ts]) => (
-          <div key={c}><h3>{c}</h3>{ts.map((t) => (
-            <span key={t.id} className="tag-row">
-              <Chip tag={t} on={on.has(t.id)} onClick={() => !lock.includes(t.id) && toggle(t.id)} />
-              {canDelete && c !== 'Person' && (
-                <HoldButton size="sm" radius={99} holdTime={1000} doneLabel="Gone" backgroundColor="transparent" textColor="var(--dim)"
-                  fillColor="#a33a34" glow={false} resetAfter={400} className="tag-del" aria-label={`Delete ${t.name} tag entirely`} title={`Delete ${t.name} tag entirely`}
-                  onHold={() => del(t.id)}>×</HoldButton>)}
-            </span>))}</div>))}
+        {Object.entries(g).map(([c, ts]) => {
+          const isOpen = !closed.has(c);
+          return (
+            <div key={c} className="tag-category">
+              <button type="button" className="tag-category-head" onClick={() => toggleCat(c)} aria-expanded={isOpen}>
+                <span className="tag-category-chevron" aria-hidden="true">{isOpen ? '▾' : '▸'}</span>
+                <h3>{c}</h3><span className="dim">({ts.length})</span>
+              </button>
+              {isOpen && <div className="tag-category-body">{ts.map((t) => (
+                <span key={t.id} className="tag-row">
+                  <Chip tag={t} on={on.has(t.id)} onClick={() => !lock.includes(t.id) && toggle(t.id)} />
+                  {canDelete && c !== 'Person' && (
+                    <HoldButton size="sm" radius={99} holdTime={1000} doneLabel="Gone" backgroundColor="transparent" textColor="var(--dim)"
+                      fillColor="#a33a34" glow={false} resetAfter={400} className="tag-del" aria-label={`Delete ${t.name} tag entirely`} title={`Delete ${t.name} tag entirely`}
+                      onHold={() => del(t.id)}>×</HoldButton>)}
+                </span>))}</div>}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -653,13 +699,14 @@ function TagPicker({ tags, on, lock = [], toggle, create, close, canDelete, onDe
 export function Compose({ done, me }) {
   const [tags, setTags] = useState([]), [title, setTitle] = useState(''), [body, setBody] = useState(''), [when, setWhen] = useState(nowInput());
   const [pick, setPick] = useState([]), [conf, setConf] = useState(''), [source, setSource] = useState(''), [picker, setPicker] = useState(false), [err, setErr] = useState(''), [locked, setLocked] = useState(false);
-  // Every filing starts at Warden-only clearance, no matter who's posting — same rule the server
-  // enforces either way (server/index.js ignores this field entirely unless you're a Warden). A
-  // Warden can still lower it right here before lodging; this just changes what the field starts on.
+  // Every filing starts at the sitewide default clearance (a Warden can tune it in Personnel; see
+  // DefaultClearanceControl below) no matter who's posting — same rule the server enforces either
+  // way (server/index.js ignores this field entirely unless you're a Warden). A Warden can still
+  // lower it right here before lodging; this just changes what the field starts on.
   const [clearance, setClearance] = useState(MAX_CLEARANCE);
   const pending = useRef(null);
   const load = () => api.get('/tags').then((c) => setTags(c.flatMap((x) => x.tags.map((t) => ({ ...t, category: x.name })))));
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); api.get('/settings/default-clearance').then((d) => setClearance(d.clearance)).catch(() => {}); }, []);
   useEffect(() => () => { const p = pending.current; if (p) { pending.current = null; api.post('/reports', p); } }, []); // leaving mid-fuse still sends
   const auto = tags.filter((t) => hit(t, title + ' ' + body)).map((t) => t.id);
   const on = new Set([...auto, ...pick]);
@@ -698,7 +745,7 @@ export function Compose({ done, me }) {
           {err && <p className="bad">{err}</p>}
           <p className="dim">{me.role === 'warden'
             ? (clearance > 0 ? `Clearance: ${CLEARANCE_LABEL[clearance]}. Below that level the report reads as scrambled nonsense — it's encrypted. A Warden can still grant it to specific people.` : 'Everyone can read this one.')
-            : `Every filing starts at ${CLEARANCE_LABEL[MAX_CLEARANCE]}. Only Wardens (and you) can read it until one lowers the clearance or grants it to someone directly.`}</p>
+            : `Every filing starts at ${CLEARANCE_LABEL[clearance]}. Only Wardens cleared for that level (and you) can read it until one lowers the clearance or grants it to someone directly.`}</p>
           <p className="dim">After you press it, the fuse burns for one second. Press Undo before it ends and nothing is sent.</p>
           <FuseButton label="Lodge report" doneLabel="Lodged" undoLabel="Undo" undoWindow={1000} size="lg" radius={10} fuse="outline"
             background="#27272a" color="#f5f5f5" fuseColor="#e0b94a" disabled={!title.trim() || !body.trim()} onCommit={arm} onUndo={undo} onFuseEnd={fire} />
@@ -720,13 +767,29 @@ const SORT_OPTS = [
 function ReportsArchive({ me, sel, setSel, view }) {
   const [q, setQ] = useState(''), [rows, setRows] = useState([]), [stats, setStats] = useState([]), [sd, setSd] = useState(false), [k, setK] = useState(0), [picker, setPicker] = useState(false);
   const [sort, setSort] = useState('time-desc');
+  const [hideSealed, setHideSealed] = useState(false);
+  // Infinite scroll past the server's default 50: `limit` only ever grows (page by page) while
+  // scrolling the same results, and resets back to 50 whenever a filter actually changes below.
+  const [limit, setLimit] = useState(50), [hasMore, setHasMore] = useState(false);
+  const sentinelRef = useRef(null);
   const shredColor = useThemeVar('--cell', '#1b1b1d'), shredSlit = useThemeVar('--line', '#2a2a2c');
   const shredRef = useRef(null);
   useEffect(() => { api.get('/stats/tags').then(setStats); }, [k]);
+  useEffect(() => { setLimit(50); }, [q, sel, sd, sort]);
   useEffect(() => {
-    const t = setTimeout(() => api.get(`/reports?q=${encodeURIComponent(q)}&tags=${sel.join(',')}&deleted=${sd ? 1 : 0}&sort=${sort}`).then(setRows), 250);
+    const t = setTimeout(() => api.get(`/reports?q=${encodeURIComponent(q)}&tags=${sel.join(',')}&deleted=${sd ? 1 : 0}&sort=${sort}&limit=${limit}`)
+      .then((r) => { setRows(r); setHasMore(r.length >= limit); }), 250);
     return () => clearTimeout(t);
-  }, [q, sel, sd, k, sort]);
+  }, [q, sel, sd, k, sort, limit]);
+  // Once the sentinel below the list scrolls into view, and the last page came back full (so there's
+  // likely more beyond it), load another page by growing `limit` — same request, just asking for more.
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el || !hasMore) return;
+    const obs = new IntersectionObserver((entries) => { if (entries[0].isIntersecting) setLimit((l) => l + 50); }, { rootMargin: '400px' });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [hasMore, rows.length]);
   const flip = (id) => setSel(sel.includes(id) ? sel.filter((x) => x !== id) : [...sel, id]);
   const shred = (item) => {
     api.post(`/reports/${item.id}/redact`);
@@ -742,21 +805,24 @@ function ReportsArchive({ me, sel, setSel, view }) {
     drop: (el, item, x, y) => shredRef.current?.feedExternal(el, item, x, y),
   };
   const isWarden = me.role === 'warden';
+  const visible = hideSealed ? rows.filter((r) => !r.scrambled) : rows;
   return (
     <div className={isWarden ? 'arch' : 'arch solo'}>
       <div>
         <div className="panel">
-          <input placeholder="Search the contents of every report..." value={q} onChange={(e) => setQ(e.target.value)} />
+          <input placeholder="Search the contents of every report, or an author's callsign..." value={q} onChange={(e) => setQ(e.target.value)} />
           <div>{stats.filter((t) => sel.includes(t.id)).map((t) => <Chip key={t.id} tag={t} n={t.n} on onClick={() => flip(t.id)} />)}
             <button type="button" className="plus" onClick={() => setPicker(true)}>+ Filter by tag</button></div>
-          <div className="row"><span className="dim">{rows.length} report(s)</span>
+          <div className="row"><span className="dim">{visible.length}{hasMore ? '+' : ''} report(s)</span>
             <Sel ariaLabel="Sort by" size="sm" value={sort} onChange={setSort} options={SORT_OPTS} />
             {sel.length > 0 && <button onClick={() => setSel([])}>Clear filters</button>}
-            {isWarden && <label><input type="checkbox" checked={sd} onChange={(e) => setSd(e.target.checked)} /> show redacted</label>}</div>
+            <label><input type="checkbox" checked={hideSealed} onChange={(e) => setHideSealed(e.target.checked)} /> Hide Sealed</label>
+            {isWarden && <label><input type="checkbox" checked={sd} onChange={(e) => setSd(e.target.checked)} /> Redacted</label>}</div>
         </div>
         <div className={view === 'tile' ? 'tiles' : undefined}>
-          {rows.map((r) => <Report key={r.id} r={r} me={me} onChange={() => setK((x) => x + 1)} variant={view} shredder={isWarden ? shredder : null} />)}
+          {visible.map((r) => <Report key={r.id} r={r} me={me} onChange={() => setK((x) => x + 1)} variant={view} shredder={isWarden ? shredder : null} />)}
         </div>
+        {hasMore && <div ref={sentinelRef} className="dim load-sentinel">Loading more…</div>}
         {picker && <TagPicker tags={stats} on={new Set(sel)} toggle={flip} close={() => setPicker(false)}
           canDelete={isWarden} onDeleted={(id) => { setSel((s) => s.filter((x) => x !== id)); setK((x) => x + 1); }} />}
       </div>
@@ -1136,13 +1202,59 @@ const HB = ({ children, done, danger, onHold }) => (
     fillColor={danger ? '#a33a34' : '#4f8f86'} glow={false} resetAfter={500} onHold={onHold}>{children}</HoldButton>
 );
 
+// A Warden-only control for the sitewide default clearance every new filing starts at (both a
+// report and a POI file use the same setting — see getDefaultClearance in server/index.js).
+function DefaultClearanceControl() {
+  const [clearance, setClearance] = useState(null), [msg, setMsg] = useState('');
+  useEffect(() => { api.get('/settings/default-clearance').then((d) => setClearance(d.clearance)); }, []);
+  const save = (c) => api.patch('/settings/default-clearance', { clearance: c })
+    .then((d) => { setClearance(d.clearance); setMsg('Saved.'); setTimeout(() => setMsg(''), 2000); });
+  if (clearance === null) return null;
+  return (
+    <div className="row" style={{ alignItems: 'center' }}>
+      <span className="dim">Default clearance for new filings:</span>
+      <Sel ariaLabel="Default filing clearance" size="sm" value={clearance} onChange={save}
+        options={CLEARANCE_LABEL.map((l, i) => ({ value: i, label: l }))} />
+      {msg && <span className="dim">{msg}</span>}
+    </div>
+  );
+}
+
+// A quick headcount: per-person report/addendum counts plus a few sitewide totals, pulled from
+// GET /api/stats/personnel. Kept to a read-only table — any digging into *why* a number looks a
+// certain way happens over in the Archive, this is just the roundup.
+function PersonnelStats() {
+  const [s, setS] = useState(null);
+  useEffect(() => { api.get('/stats/personnel').then(setS); }, []);
+  if (!s) return <p className="dim">Loading...</p>;
+  const { totals, perUser } = s;
+  return (
+    <>
+      <div className="row" style={{ flexWrap: 'wrap', gap: 18 }}>
+        <div className="mini"><b>{totals.reports}</b><span className="meta">Reports on file</span></div>
+        <div className="mini"><b>{totals.redacted}</b><span className="meta">Redacted</span></div>
+        <div className="mini"><b>{totals.agents}</b><span className="meta">Agents</span></div>
+        <div className="mini"><b>{totals.wardens}</b><span className="meta">Wardens</span></div>
+        <div className="mini"><b>{totals.pending}</b><span className="meta">Pending</span></div>
+        <div className="mini"><b>{totals.pois}</b><span className="meta">Persons of interest</span></div>
+        <div className="mini"><b>{totals.factions}</b><span className="meta">Factions</span></div>
+      </div>
+      <table><thead><tr><th>Callsign</th><th>Role</th><th>Reports</th><th>Addenda</th></tr></thead>
+        <tbody>{perUser.map((x) => <tr key={x.id}><td>{x.callsign}</td><td className="dim">{x.role}</td><td>{x.reports}</td><td>{x.addenda}</td></tr>)}</tbody></table>
+    </>
+  );
+}
+
 export function Personnel({ me }) {
   const [u, setU] = useState([]), [err, setErr] = useState(''), [showHidden, setShowHidden] = useState(false);
+  const [tab, setTab] = useState('roster');
   // Notes are edited one account at a time, inline — opening a second account's notes swaps the
   // open one, it doesn't stack several editors at once.
   const [notesId, setNotesId] = useState(null), [draft, setDraft] = useState('');
   const load = () => api.get(`/users${showHidden ? '?hidden=1' : ''}`).then(setU);
   useEffect(() => { load(); }, [showHidden]);
+  // Light polling so "who's active right now" doesn't go stale while this tab sits open.
+  useEffect(() => { if (tab !== 'roster') return; const id = setInterval(load, 20000); return () => clearInterval(id); }, [tab, showHidden]);
   const role = (id, r) => api.patch('/users/' + id, { role: r }).then(() => { setErr(''); load(); }).catch((e) => setErr(e.message));
   const clearance = (id, c) => api.patch('/users/' + id + '/clearance', { clearance: c }).then(() => { setErr(''); load(); }).catch((e) => setErr(e.message));
   const deny = (id) => api.del('/users/' + id).then(() => { setErr(''); load(); }).catch((e) => setErr(e.message));
@@ -1153,13 +1265,21 @@ export function Personnel({ me }) {
   const saveNotes = (id) => api.patch(`/users/${id}/notes`, { notes: draft }).then(() => { setNotesId(null); setErr(''); load(); }).catch((e) => setErr(e.message));
   return (
     <>
-      <div className="panel"><h2>Personnel</h2><p className="dim">Hold a button to confirm. A tap does nothing.</p>
+      <div className="panel">
+        <div className="row subnav">
+          <button className={tab === 'roster' ? 'tab on' : 'tab'} onClick={() => setTab('roster')}>Roster</button>
+          <button className={tab === 'stats' ? 'tab on' : 'tab'} onClick={() => setTab('stats')}>Stats</button>
+        </div>
+        <h2>Personnel</h2>
+        <DefaultClearanceControl />
+        {tab === 'stats' ? <PersonnelStats /> : (<>
+        <p className="dim">Hold a button to confirm. A tap does nothing.</p>
         {err && <p className="bad">{err}</p>}
         <label className="dim"><input type="checkbox" checked={showHidden} onChange={(e) => setShowHidden(e.target.checked)} /> show hidden</label>
         <table><tbody>{u.flatMap((x) => {
           const row = (
             <tr key={x.id} className={x.hidden ? 'personnel-hidden' : ''}>
-              <td>{x.callsign}{x.hidden ? ' (hidden)' : ''}</td><td className="dim">{x.role}</td>
+              <td>{x.callsign}{x.hidden ? ' (hidden)' : ''} {x.online && <span className="online-dot" title="Currently logged in" />}</td><td className="dim">{x.role}</td>
               <td>{x.id !== me.id && x.role !== 'pending' && (
                 <Sel ariaLabel={`Clearance for ${x.callsign}`} size="sm" value={x.clearance} onChange={(v) => clearance(x.id, v)}
                   options={CLEARANCE_LABEL.map((l, i) => ({ value: i, label: l }))} />)}</td>
@@ -1184,6 +1304,7 @@ export function Personnel({ me }) {
             </td></tr>
           )];
         })}</tbody></table>
+        </>)}
       </div>
     </>
   );
@@ -1252,8 +1373,10 @@ function PoiCard({ p, me, reload, openTag, variant = 'list' }) {
 
 function PoisArchive({ me, openTag, view }) {
   const [list, setList] = useState([]), [q, setQ] = useState(''), [form, setForm] = useState(null), [err, setErr] = useState(''), [sd, setSd] = useState(false);
+  const [defClearance, setDefClearance] = useState(MAX_CLEARANCE);
   const load = () => api.get(`/pois?deleted=${sd ? 1 : 0}`).then(setList);
   useEffect(() => { load(); }, [sd]);
+  useEffect(() => { api.get('/settings/default-clearance').then((d) => setDefClearance(d.clearance)).catch(() => {}); }, []);
   const create = () => api.post('/pois', form).then(() => { setForm(null); setErr(''); load(); }).catch((e) => setErr(e.message));
   const shown = list.filter((x) => (x.name + ' ' + x.aliases + ' ' + x.description).toLowerCase().includes(q.toLowerCase()));
   return (
@@ -1261,7 +1384,7 @@ function PoisArchive({ me, openTag, view }) {
       <div className="panel">
         <input placeholder="Search persons of interest..." value={q} onChange={(e) => setQ(e.target.value)} />
         <div className="row"><span className="dim">{shown.length} file(s)</span>
-          <button className="plus" onClick={() => setForm({ name: '', aliases: '', description: '', clearance: MAX_CLEARANCE })}>+ New person</button>
+          <button className="plus" onClick={() => setForm({ name: '', aliases: '', description: '', clearance: defClearance })}>+ New person</button>
           {me.role === 'warden' && <label><input type="checkbox" checked={sd} onChange={(e) => setSd(e.target.checked)} /> show redacted</label>}</div>
         {form && (
           <div className="form"><input placeholder="Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
@@ -1269,8 +1392,8 @@ function PoisArchive({ me, openTag, view }) {
             <textarea rows={5} placeholder="Description, allegiances, habits. Markdown works." value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
             {me.role === 'warden' && <ClearanceSelect value={form.clearance} onChange={(c) => setForm({ ...form, clearance: c })} />}
             <p className="dim">{me.role === 'warden'
-              ? 'A file always opens at Warden-only clearance unless lowered here.'
-              : 'This file opens at Warden-only clearance, a Warden can open it up afterward.'}</p>
+              ? `A file always opens at ${CLEARANCE_LABEL[defClearance]} (the sitewide default) unless lowered here.`
+              : `This file opens at ${CLEARANCE_LABEL[defClearance]}, a Warden can open it up afterward.`}</p>
             {err && <p className="bad">{err}</p>}
             <div className="row"><button className="primary" onClick={create}>Open file</button><button onClick={() => setForm(null)}>Cancel</button></div></div>)}
       </div>
@@ -1278,6 +1401,59 @@ function PoisArchive({ me, openTag, view }) {
         {shown.map((p) => <PoiCard key={p.id} p={p} me={me} reload={load} openTag={openTag} variant={view} />)}
       </div>
       {!list.length && <p className="dim">No files yet. Anyone named in a report is tagged as soon as they have one.</p>}
+    </div>
+  );
+}
+
+// Bug reports & suggestions — open to anyone signed in, deliberately lightweight (no clearance, no
+// revision history, just a note and a status). An agent sees only their own submissions; a Warden
+// sees and triages everyone's. The "kind" split (bug vs suggestion) is just a filter/label, not a
+// different shape of record.
+const FEEDBACK_KIND_OPTS = [{ value: 'bug', label: 'Bug' }, { value: 'suggestion', label: 'Suggestion' }];
+export function Feedback({ me }) {
+  const [rows, setRows] = useState([]), [kind, setKind] = useState('bug'), [body, setBody] = useState(''), [err, setErr] = useState('');
+  const [filter, setFilter] = useState('open');
+  const load = () => api.get('/feedback').then(setRows);
+  useEffect(() => { load(); }, []);
+  const submit = () => {
+    if (!body.trim()) return;
+    api.post('/feedback', { kind, body }).then(() => { setBody(''); setErr(''); load(); }).catch((e) => setErr(e.message));
+  };
+  const setStatus = (id, status) => api.patch(`/feedback/${id}/status`, { status }).then(load);
+  const shown = rows.filter((f) => filter === 'all' || f.status === filter);
+  const isWarden = me.role === 'warden';
+  return (
+    <div className="cols">
+      <BorderGlow {...glow}>
+        <div className="glow-pad">
+          <h2>Report a bug or suggestion</h2>
+          <div className="row" style={{ marginBottom: 8 }}>
+            <Sel ariaLabel="Kind" size="sm" value={kind} onChange={setKind} options={FEEDBACK_KIND_OPTS} />
+          </div>
+          <textarea rows={6} placeholder="What went wrong, or what would help?" value={body} onChange={(e) => setBody(e.target.value)} />
+          {err && <p className="bad">{err}</p>}
+          <button className="primary" onClick={submit} disabled={!body.trim()}>Submit</button>
+        </div>
+      </BorderGlow>
+      <div className="panel">
+        <div className="row"><h3 style={{ flex: 1 }}>{isWarden ? 'All submissions' : 'Your submissions'}</h3>
+          <Sel ariaLabel="Filter" size="sm" value={filter} onChange={setFilter}
+            options={[{ value: 'open', label: 'Open' }, { value: 'closed', label: 'Closed' }, { value: 'all', label: 'All' }]} /></div>
+        {shown.map((f) => (
+          <div key={f.id} className="mini feedback-row">
+            <div className="row"><Chip tag={{ name: f.kind, category: f.kind === 'bug' ? 'Bug' : 'Suggestion' }} on />
+              <span className="meta" style={{ flex: 1 }}>{stamp(f.created_at)}{isWarden && `, ${f.author_label || 'removed account'}`}</span>
+              <span className="dim">{f.status}</span></div>
+            <Md text={f.body} />
+            {isWarden && (
+              <div className="row">
+                {f.status === 'open' ? <button onClick={() => setStatus(f.id, 'closed')}>Mark closed</button>
+                  : <button onClick={() => setStatus(f.id, 'open')}>Reopen</button>}
+              </div>)}
+          </div>
+        ))}
+        {!shown.length && <p className="dim">Nothing here.</p>}
+      </div>
     </div>
   );
 }

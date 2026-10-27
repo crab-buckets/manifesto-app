@@ -336,6 +336,41 @@ CREATE TABLE IF NOT EXISTS report_reads(
   PRIMARY KEY(user_id, report_id));
 `);
 
+// ---- multiple sources per report: a plain many-to-many on top of the existing `sources` table,
+// independent of the single source_id a report/revision/addendum already carries (that one means
+// "the source for this version of the text"; this is a freely addable/removable list of corroborating
+// citations, same shape as a tag — added or removed without creating a revision). ----
+db.exec(`
+CREATE TABLE IF NOT EXISTS report_sources(
+  report_id INTEGER NOT NULL REFERENCES reports(id),
+  source_id INTEGER NOT NULL REFERENCES sources(id),
+  added_by INTEGER NOT NULL REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (${NOW}),
+  PRIMARY KEY(report_id, source_id));
+`);
+
+// ---- bug reports & suggestions: any signed-in account can leave one, a Warden can triage them.
+// Deliberately plain (no revision history, no clearance gating) — this is app feedback, not a case
+// file. author_id is nullable so a submitter's account can still be removed later without blocking it
+// (same reasoning as notes_messages.author_id), and the submitted text stands on its own either way. ----
+db.exec(`
+CREATE TABLE IF NOT EXISTS feedback(
+  id INTEGER PRIMARY KEY,
+  kind TEXT NOT NULL CHECK(kind IN ('bug','suggestion')),
+  body TEXT NOT NULL,
+  author_id INTEGER REFERENCES users(id),
+  author_label TEXT,
+  status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','closed')),
+  created_at TEXT NOT NULL DEFAULT (${NOW}),
+  resolved_at TEXT,
+  resolved_by INTEGER REFERENCES users(id));
+`);
+
+// ---- small global key/value settings a Warden can tune — starting with the sitewide default
+// clearance new reports file at. A plain table rather than another ALTER TABLE column since this is
+// app configuration, not a record about any one user, report, etc. ----
+db.exec(`CREATE TABLE IF NOT EXISTS app_settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+
 // A curated pool of in-universe cover names. Assigned once, at signup, to every account that isn't
 // the first (the founding Warden never needs one) — see server/index.js. Kept here so it sits next
 // to the column it fills.

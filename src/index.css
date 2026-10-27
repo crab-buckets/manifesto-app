@@ -217,15 +217,33 @@ fieldset.bare { border: 0; padding: 0; margin: 0; min-width: 0; }
   box-shadow: 0 10px 40px rgba(0, 0, 0, .5);
 }
 
-/* ---- addenda: dated follow-up notes, never edited or removed ---- */
-.addenda { margin: 14px 0; padding-top: 10px; border-top: 1px solid var(--line); }
-.addendum { padding: 8px 0; border-bottom: 1px dashed var(--line); }
-.addendum:last-child { border-bottom: 0; }
-.addendum-head { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; background: none; border: 0; padding: 4px 0; color: inherit; cursor: pointer; }
+/* ---- addenda: dated follow-up notes, never edited or removed. Styled as their own distinct,
+   stacked cards (not just a dashed-off list) so an addendum reads as clearly separate from the
+   report body it follows, while staying collapsible the same way it already was. ---- */
+.addenda { margin: 16px 0; padding-top: 12px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
+.addendum {
+  padding: 10px 12px; border: 1px solid var(--line); border-left: 3px solid var(--wax); border-radius: 8px;
+  background: color-mix(in srgb, var(--cell) 55%, transparent);
+}
+.addendum.open { background: color-mix(in srgb, var(--cell) 80%, transparent); }
+.addendum-head { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; background: none; border: 0; padding: 2px 0; color: inherit; cursor: pointer; }
 .addendum-head .meta { flex: none; }
 .addendum-preview { flex: 1; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .addendum-chevron { color: var(--dim); }
 .addendum.open .addendum-head { padding-bottom: 8px; }
+
+/* ---- collapsible tag categories (TagPicker) ---- */
+.tag-category { margin-bottom: 6px; }
+.tag-category-head { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; background: none; border: 0; padding: 6px 0; color: inherit; cursor: pointer; }
+.tag-category-head h3 { margin: 0; }
+.tag-category-chevron { color: var(--dim); width: 1em; }
+.tag-category-body { padding-left: 1.4em; }
+
+/* ---- Personnel: online indicator, infinite-scroll sentinel, feedback rows ---- */
+.online-dot { display: inline-block; width: 8px; height: 8px; border-radius: 99px; background: #4caf6d; box-shadow: 0 0 4px #4caf6d; vertical-align: middle; }
+.load-sentinel { text-align: center; padding: 14px 0; }
+.feedback-row { border-bottom: 1px solid var(--line); padding-bottom: 10px; margin-bottom: 10px; }
+.feedback-row:last-child { border-bottom: 0; }
 
 /* ---- discord-style markdown: spoilers and underline ---- */
 .spoiler { background: var(--ink); color: transparent; border-radius: 3px; padding: 0 2px; cursor: pointer; transition: background .15s, color .15s; }

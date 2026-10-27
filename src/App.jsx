@@ -11,7 +11,7 @@ import TextType from './components/TextType/TextType';
 const Dither = lazy(() => import('./components/Dither/Dither'));
 import { api } from './api';
 import ErrorBoundary from './components/ErrorBoundary';
-import { Clock, Dashboard, Compose, Archive, Personnel, SettingsCog } from './views';
+import { Clock, Dashboard, Compose, Archive, Personnel, Feedback, SettingsCog } from './views';
 import './index.css';
 
 // The public face of the site, before anyone has signed in, a mundane cover, same as every
@@ -81,7 +81,7 @@ export default function App() {
   const save = (s) => { setSettings(s); api.put('/settings', s); };
   const openTag = (ids) => { setSel(ids); setSub('reports'); setView('arch'); };
   const T = THEMES[settings.theme] || THEMES.nocturne;
-  const tabs = [['dash', 'Dashboard'], ['file', 'File report'], ['arch', 'Archive'], ...(me?.role === 'warden' ? [['users', 'Personnel']] : [])];
+  const tabs = [['dash', 'Dashboard'], ['file', 'File report'], ['arch', 'Archive'], ...(me?.role === 'warden' ? [['users', 'Personnel']] : []), ['feedback', 'Feedback']];
   let body = null;
   if (me === null) body = <Auth onIn={setMe} />;
   else if (me) body = (
@@ -97,6 +97,7 @@ export default function App() {
       {view === 'file' && <Compose me={me} done={() => setView('arch')} />}
       {view === 'arch' && <Archive me={me} sel={sel} setSel={setSel} sub={sub} setSub={setSub} openTag={openTag} />}
       {view === 'users' && me.role === 'warden' && <Personnel me={me} />}
+      {view === 'feedback' && <Feedback me={me} />}
     </div>
   );
   const content = (

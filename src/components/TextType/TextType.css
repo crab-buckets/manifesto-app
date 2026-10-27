@@ -1,12 +1,11 @@
 .text-type {
   display: inline-block;
-  font-size: clamp(32px, 5vw, 64px);
-  color: black;
 }
 .text-type__content {
   white-space: pre-wrap;
 }
-
+/* Blinking is driven by gsap (opacity tween on this element's ref), not a CSS animation, so this is
+   just the cursor glyph's static styling. */
 .text-type__cursor {
   display: inline-block;
   margin-left: 1px;
